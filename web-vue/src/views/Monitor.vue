@@ -294,9 +294,12 @@ const stageItems = computed(() => {
     { key: 'prepare_conversation_ms', label: '会话准备 P95', value: formatMs(p95.prepare_conversation_ms), meta: '准备图片生成会话' },
     { key: 'generation_start_ms', label: '启动生成 P95', value: formatMs(p95.generation_start_ms), meta: '提交上游图片生成请求' },
     { key: 'conversation_stream_ms', label: '上游生成 P95', value: formatMs(p95.conversation_stream_ms), meta: 'ChatGPT 会话流返回到解析前' },
+    { key: 'stream_error_ms', label: '上游异常 P95', value: formatMs(p95.stream_error_ms), meta: 'HTTP2 / SSE / 代理流异常前耗时' },
     { key: 'resolve_ms', label: '图片解析 P95', value: formatMs(p95.resolve_ms), meta: '从 conversation/file/sediment 解析图片 URL' },
     { key: 'download_ms', label: '图片下载 P95', value: formatMs(p95.download_ms), meta: '下载图片并准备返回' },
     { key: 'retry_wait_ms', label: '重试等待 P95', value: formatMs(p95.retry_wait_ms), meta: '轮询、TLS 或连接失败后的退避等待' },
+    { key: 'response_ms', label: '响应整理 P95', value: formatMs(p95.response_ms), meta: 'Codex 图片响应整理' },
+    { key: 'stream_ms', label: '单图内部 P95', value: formatMs(p95.stream_ms), meta: '单张图进入上游到结果返回' },
     { key: 'total_ms', label: '单图总耗时 P95', value: formatMs(p95.total_ms), meta: '单张图内部完整耗时' },
   ]
 })
@@ -404,6 +407,7 @@ function trackedDurationMs(row: RealtimeMonitorRecord) {
     'prepare_conversation_ms',
     'generation_start_ms',
     'conversation_stream_ms',
+    'stream_error_ms',
     'resolve_ms',
     'download_ms',
     'retry_wait_ms',
@@ -428,12 +432,13 @@ function slowMetricItems(row: RealtimeMonitorRecord) {
     { key: 'prepare_conversation_ms', label: '准备' },
     { key: 'generation_start_ms', label: '启动' },
     { key: 'conversation_stream_ms', label: '上游' },
+    { key: 'stream_error_ms', label: '上游异常' },
     { key: 'resolve_ms', label: '解析/轮询' },
     { key: 'download_ms', label: '下载' },
     { key: 'retry_wait_ms', label: '重试等待' },
     { key: 'response_ms', label: '响应整理' },
-    { key: 'stream_ms', label: '单图链路' },
-    { key: 'total_ms', label: '单图总计' },
+    { key: 'stream_ms', label: '单图内部' },
+    { key: 'total_ms', label: '单图总耗时' },
   ]
   const items = pairs
     .map((item) => {
@@ -477,6 +482,9 @@ function slowRowReason(row: RealtimeMonitorRecord) {
   if (top.key === 'conversation_stream_ms') {
     return `主要卡在上游会话流，通常是 ChatGPT 生成阶段耗时。`
   }
+  if (top.key === 'stream_error_ms') {
+    return `主要卡在上游流式连接，通常是 HTTP2/SSE、代理或上游边缘节点中断。`
+  }
   if (['upload_ms', 'bootstrap_ms', 'requirements_ms', 'prepare_conversation_ms', 'generation_start_ms'].includes(top.key)) {
     return `主要卡在上游准备阶段：${top.label} ${top.value}。`
   }
@@ -519,12 +527,13 @@ function eventMetricText(row: RealtimeMonitorEvent) {
     ['准备', 'prepare_conversation_ms'],
     ['启动', 'generation_start_ms'],
     ['上游', 'conversation_stream_ms'],
+    ['上游异常', 'stream_error_ms'],
     ['解析/轮询', 'resolve_ms'],
     ['下载', 'download_ms'],
     ['重试等待', 'retry_wait_ms'],
     ['响应整理', 'response_ms'],
-    ['单图链路', 'stream_ms'],
-    ['单图总计', 'total_ms'],
+    ['单图内部', 'stream_ms'],
+    ['单图总耗时', 'total_ms'],
   ] as const
   const parts = pairs
     .map(([label, key]) => {

@@ -101,6 +101,17 @@
                   <p class="mt-1 text-xs text-muted-foreground">单位秒，等待上游图片结果的最长时间。</p>
                 </FormField>
 
+                <FormField label="上游流超时">
+                  <Input
+                    :model-value="imageStreamTimeoutField.input.value"
+                    type="number"
+                    block
+                    placeholder="300"
+                    @update:model-value="imageStreamTimeoutField.update"
+                  />
+                  <p class="mt-1 text-xs text-muted-foreground">单位秒，限制 ChatGPT 生图 SSE 流最长等待时间。</p>
+                </FormField>
+
                 <FormField label="单账号图片并发">
                   <Input
                     :model-value="imageAccountConcurrencyField.input.value"
@@ -1317,6 +1328,14 @@ const imagePollTimeoutField = createNumberField(
     localSettings.value.image_poll_timeout_secs = value
   },
   { integer: true, min: 1, fallback: 120 },
+)
+const imageStreamTimeoutField = createNumberField(
+  () => localSettings.value?.image_stream_timeout_secs ?? 300,
+  (value) => {
+    if (!localSettings.value) return
+    localSettings.value.image_stream_timeout_secs = value
+  },
+  { integer: true, min: 1, fallback: 300 },
 )
 const imageAccountConcurrencyField = createNumberField(
   () => localSettings.value?.image_account_concurrency ?? 3,

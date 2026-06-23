@@ -144,6 +144,7 @@ export function normalizeSettings(raw: RawSettings | null | undefined): Settings
     refresh_account_interval_minute: numberValue(source.refresh_account_interval_minute, 5, 1),
     image_retention_days: numberValue(source.image_retention_days ?? basic.image_expire_hours, 15, 1),
     image_poll_timeout_secs: numberValue(source.image_poll_timeout_secs, 120, 1),
+    image_stream_timeout_secs: numberValue(source.image_stream_timeout_secs, 300, 1),
     image_poll_interval_secs: numberValue(source.image_poll_interval_secs, 10, 0.5),
     image_poll_initial_wait_secs: numberValue(source.image_poll_initial_wait_secs, 10, 0),
     image_account_concurrency: numberValue(source.image_account_concurrency, 3, 1),

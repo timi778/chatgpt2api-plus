@@ -319,10 +319,26 @@ def is_connection_timeout_error(message: str) -> bool:
     )
 
 
+def is_stream_transport_error(message: str) -> bool:
+    """检测上游流式响应传输错误，这类错误通常来自 HTTP/2/SSE/代理长连接。"""
+    text = str(message or "").lower()
+    return (
+        "curl: (92)" in text
+        or "http/2 stream" in text
+        or "internal_error" in text
+        or "stream was not closed cleanly" in text
+        or "stream reset" in text
+        or "response ended prematurely" in text
+        or "sse stream exceeded" in text
+    )
+
+
 def image_stream_error_message(message: str) -> str:
     text = str(message or "")
     if is_token_invalid_error(text):
         return "image generation failed"
+    if is_stream_transport_error(text):
+        return "upstream image stream interrupted, please retry later"
     if is_tls_connection_error(text):
         return "upstream image connection failed, please retry later"
     if is_connection_timeout_error(text):
@@ -1212,9 +1228,8 @@ def stream_image_outputs(
                 "conversation_id": conversation_id,
                 "message_preview": message[:200],
             })
-            # 文本回复场景下，图片可能需要 4-5 分钟才能异步生成完成。
-            # 使用 300s 超时并允许多次重试，避免因临时网络问题提前退出。
-            retry_poll_timeout = max(config.image_poll_timeout_secs, 300)
+            # 文本回复场景下图片可能需要异步生成完成，轮询超时以设置页配置为准。
+            retry_poll_timeout = config.image_poll_timeout_secs
             MAX_POLL_RETRIES = 3
             for poll_attempt in range(1, MAX_POLL_RETRIES + 1):
                 try:
@@ -1336,9 +1351,8 @@ def stream_image_outputs(
                 "error": repr(exc)[:300],
             })
     if should_poll_for_image and conversation_id:
-        # 图片可能仍在异步处理中（上游 SSE 流在图片生成完成前就结束了）。
-        # 使用 300s 超时并允许多次重试，避免因临时网络问题或图片尚未提交而提前退出。
-        retry_poll_timeout = max(config.image_poll_timeout_secs, 300)
+        # 图片可能仍在异步处理中（上游 SSE 流在图片生成完成前就结束了），轮询超时以设置页配置为准。
+        retry_poll_timeout = config.image_poll_timeout_secs
         MAX_FALLBACK_POLL_RETRIES = 3
         for poll_attempt in range(1, MAX_FALLBACK_POLL_RETRIES + 1):
             retry_wait_secs = min(30.0 * poll_attempt, config.image_poll_initial_wait_secs * poll_attempt)
@@ -1547,6 +1561,7 @@ def _generate_single_image(
 
     while True:
         account_wait_started = time.perf_counter()
+        stream_started = 0.0
         try:
             if request.progress_callback:
                 request.progress_callback("getting_account")
@@ -1790,11 +1805,24 @@ def _generate_single_image(
         except Exception as exc:
             account_service.mark_image_result(token, False)
             last_error = str(exc)
+            stream_error_ms = int((time.perf_counter() - stream_started) * 1000) if stream_started > 0 else 0
+            if request.trace_image_perf and stream_error_ms > 0:
+                _monitor_image_stage(
+                    request,
+                    "image_stream_failed",
+                    stream_error_ms=stream_error_ms,
+                    stream_ms=stream_error_ms,
+                    account_email=account_email,
+                    index=index,
+                    total=total,
+                    status="failed",
+                )
             logger.warning({
                 "event": "image_stream_fail",
                 "request_token": token,
                 "account_email": account_email,
                 "error": last_error,
+                "stream_error_ms": stream_error_ms,
                 "index": index,
             })
             if not emitted_for_token and is_token_invalid_error(last_error):

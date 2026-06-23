@@ -56,6 +56,7 @@ export interface Settings {
   refresh_account_interval_minute?: number
   image_retention_days?: number
   image_poll_timeout_secs?: number
+  image_stream_timeout_secs?: number
   image_poll_interval_secs?: number
   image_poll_initial_wait_secs?: number
   image_account_concurrency?: number

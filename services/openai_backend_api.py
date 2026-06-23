@@ -974,7 +974,7 @@ class OpenAIBackendAPI:
             self.base_url + path,
             headers=self._image_headers(path, requirements, conduit_token, "text/event-stream"),
             json=payload,
-            timeout=300,
+            timeout=config.image_stream_timeout_secs,
             stream=True,
         )
         ensure_ok(response, path)
@@ -2531,7 +2531,7 @@ class OpenAIBackendAPI:
         response = self._start_image_generation(prompt, requirements, conduit_token, model, references)
         self._report_progress("generating")
         try:
-            yield from iter_sse_payloads(response)
+            yield from iter_sse_payloads(response, max_duration_secs=config.image_stream_timeout_secs)
         finally:
             response.close()
 
