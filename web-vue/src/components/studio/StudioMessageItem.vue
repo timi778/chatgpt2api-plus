@@ -384,7 +384,7 @@ function isCodeMessage(message: StudioMessageView) {
   display: flex;
   min-height: 1.75rem;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.375rem;
   margin-bottom: 0.25rem;
 }
 
@@ -419,7 +419,7 @@ function isCodeMessage(message: StudioMessageView) {
   max-width: min(26rem, calc(100vw - 8rem));
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.25rem;
+  gap: 0.375rem;
   opacity: 1;
   transition: opacity var(--ui-duration-normal, 180ms) var(--ui-ease-out, ease);
 }
@@ -439,6 +439,8 @@ function isCodeMessage(message: StudioMessageView) {
 
 .chat-message-action {
   flex: 0 0 auto;
+  width: 1.75rem;
+  height: 1.75rem;
 }
 
 .chat-message-bubble {

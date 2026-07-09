@@ -471,8 +471,20 @@
         </div>
       </div>
 
-      <div v-if="updateCheckMessage" class="mt-3 rounded-2xl border border-border bg-muted/40 px-4 py-2 text-xs text-muted-foreground">
-        {{ updateCheckMessage }}
+      <div
+        v-if="updateCheckMessage"
+        class="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-2xl border px-4 py-3 text-sm"
+        :class="updateCheckMessageClass"
+      >
+        <span class="min-w-0 flex-1 font-medium">{{ updateCheckMessage }}</span>
+        <MetaChip
+          size="xs"
+          :tone="updateCheckBadgeTone"
+          strong
+          chip-class="shrink-0"
+        >
+          {{ updateCheckBadgeText }}
+        </MetaChip>
       </div>
 
       <div class="mt-5 max-h-[56vh] space-y-5 overflow-y-auto pr-1">
@@ -760,6 +772,32 @@ const apiKeyDisplay = computed(() => currentAuthToken.value || '未登录')
 const currentVersionLabel = computed(() => normalizeVersionTag(currentVersionTag.value || ''))
 const latestVersionLabel = computed(() => normalizeVersionTag(latestVersionTag.value || releaseEntries.value[0]?.version || currentVersionTag.value || ''))
 const versionButtonText = computed(() => currentVersionLabel.value || '版本')
+const hasNewVersion = computed(() => isNewerVersion(latestVersionLabel.value, currentVersionLabel.value))
+const updateCheckStatus = computed(() => {
+  if (isCheckingUpdate.value) return 'checking'
+  if (!updateCheckMessage.value) return 'idle'
+  if (updateCheckMessage.value.includes('失败')) return 'error'
+  if (hasNewVersion.value || updateCheckMessage.value.includes('发现新版本')) return 'available'
+  return 'current'
+})
+const updateCheckMessageClass = computed(() => {
+  if (updateCheckStatus.value === 'available') return 'border-emerald-500/40 bg-emerald-500/10 text-emerald-700'
+  if (updateCheckStatus.value === 'checking') return 'border-cyan-500/35 bg-cyan-500/10 text-cyan-700'
+  if (updateCheckStatus.value === 'error') return 'border-amber-500/40 bg-amber-500/10 text-amber-700'
+  return 'border-border bg-muted/40 text-muted-foreground'
+})
+const updateCheckBadgeText = computed(() => {
+  if (updateCheckStatus.value === 'available') return '可更新'
+  if (updateCheckStatus.value === 'checking') return '检查中'
+  if (updateCheckStatus.value === 'error') return '检查失败'
+  return '已是最新'
+})
+const updateCheckBadgeTone = computed(() => {
+  if (updateCheckStatus.value === 'available') return 'success'
+  if (updateCheckStatus.value === 'checking') return 'info'
+  if (updateCheckStatus.value === 'error') return 'warning'
+  return 'muted'
+})
 function releaseItemTone(type: string): 'default' | 'muted' | 'success' | 'warning' | 'danger' | 'info' {
   const value = String(type || '').trim()
   if (['新增', '添加', 'Added'].includes(value)) return 'success'

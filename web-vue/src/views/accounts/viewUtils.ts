@@ -1,6 +1,7 @@
 import type { Account, AccountGroup, AccountLane } from '@/api/accounts'
 import type { ProxyGroup } from '@/api/proxy'
 import { parseProxyReference, proxyReferenceLabel } from '@/api/proxy'
+import { PILL_TONE_CLASS } from '@/lib/pillTones'
 
 export type QuotaKey = 'fast' | 'thinking' | 'pro' | 'image' | 'music' | 'video'
 export type AccountStatusFilter = 'all' | 'normal' | 'limited' | 'abnormal' | 'disabled'
@@ -52,14 +53,6 @@ export type AccountProgressMetricItem = {
   label: string
   value: string | number
 }
-
-const PILL_TONE_CLASS = {
-  success: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-500',
-  warning: 'border-amber-500/40 bg-amber-500/10 text-amber-500',
-  danger: 'border-rose-500/40 bg-rose-500/10 text-rose-500',
-  info: 'border-cyan-500/40 bg-cyan-500/10 text-cyan-500',
-  neutral: 'border-muted bg-muted/20 text-muted-foreground',
-} as const
 
 const IMAGE_UNAVAILABLE_HINTS = [
   '不能创建图片',

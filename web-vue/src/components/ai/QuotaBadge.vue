@@ -1,15 +1,18 @@
 <template>
-  <span
-    class="inline-flex min-w-[2.75rem] items-center justify-center rounded-full border px-2.5 py-1 font-mono text-xs font-semibold leading-none tabular-nums"
-    :class="quotaClass"
+  <MetaChip
+    :tone="quotaTone"
+    size="xs"
+    strong
+    chip-class="min-w-[2.75rem] font-mono tabular-nums"
   >
     {{ quotaText }}
-  </span>
+  </MetaChip>
 </template>
 
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { Account } from '@/api/accounts'
+import MetaChip from './MetaChip.vue'
 
 const props = defineProps<{
   account: Account
@@ -22,16 +25,16 @@ const quotaText = computed(() => {
   return String(Math.max(0, Math.trunc(quotaValue.value)))
 })
 
-const quotaClass = computed(() => {
+const quotaTone = computed(() => {
   if (props.account.image_quota_unknown) {
-    return 'border-border bg-muted/40 text-muted-foreground'
+    return 'muted'
   }
   if (quotaValue.value <= 0) {
-    return 'border-rose-500/25 bg-rose-500/10 text-rose-700'
+    return 'danger'
   }
   if (quotaValue.value <= 3) {
-    return 'border-amber-500/25 bg-amber-500/10 text-amber-700'
+    return 'warning'
   }
-  return 'border-emerald-500/25 bg-emerald-500/10 text-emerald-700'
+  return 'success'
 })
 </script>
