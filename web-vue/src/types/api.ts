@@ -312,6 +312,24 @@ export interface AdminStatsTrend {
   model_total_times?: Record<string, number[]>
 }
 
+export interface AccountAutoRefreshStatus {
+  running: boolean
+  success?: boolean | null
+  started_at?: string
+  finished_at?: string
+  updated_at?: string
+  next_run_at?: string
+  total?: number
+  processed?: number
+  refreshed?: number
+  failed?: number
+  batch_size?: number
+  batch_count?: number
+  batch_index?: number
+  duration_seconds?: number
+  error?: string
+}
+
 export interface AdminStats {
   total_accounts: number
   active_accounts: number
@@ -323,6 +341,7 @@ export interface AdminStats {
   total_quota: number
   unlimited_quota_count?: number
   unknown_quota_count?: number
+  auto_refresh?: AccountAutoRefreshStatus
   success_count?: number
   failed_count?: number
   recent_failures?: Array<{
@@ -424,6 +443,7 @@ export interface DashboardAccountStats {
   total_success?: number
   total_fail?: number
   by_type?: Record<string, number>
+  auto_refresh?: AccountAutoRefreshStatus
   healthy: boolean
 }
 

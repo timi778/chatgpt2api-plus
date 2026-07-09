@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Event, Thread
 
@@ -11,6 +12,7 @@ from services.config import config
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 WEB_DIST_DIR = BASE_DIR / "web_dist"
+ACCOUNT_AUTO_REFRESH_BATCH_SIZE = 5
 
 
 def extract_bearer_token(authorization: str | None) -> str:
@@ -86,47 +88,94 @@ def sanitize_sub2api_servers(servers: list[dict]) -> list[dict]:
     return [sanitized for server in servers if (sanitized := sanitize_sub2api_server(server)) is not None]
 
 
-def _account_watcher_refresh_tokens(
-        limited_tokens: list[str],
-        expiring_tokens: list[str],
-) -> list[str]:
-    """Accounts that really need periodic upstream refresh.
+def _account_refresh_interval_seconds() -> int:
+    try:
+        minutes = int(config.refresh_account_interval_minute)
+    except (TypeError, ValueError):
+        minutes = 5
+    return max(1, minutes) * 60
 
-    Normal healthy accounts are verified when they are selected for work.  Polling
-    every normal account on every watcher tick creates a large amount of
-    upstream traffic under load, without improving image dispatch.
-    """
-    return list(dict.fromkeys([*limited_tokens, *expiring_tokens]))
+
+def _next_run_at(interval_seconds: int) -> str:
+    return (datetime.now(timezone.utc) + timedelta(seconds=max(1, interval_seconds))).isoformat()
+
+
+def _token_batches(tokens: list[str], batch_size: int = ACCOUNT_AUTO_REFRESH_BATCH_SIZE) -> list[list[str]]:
+    size = max(1, int(batch_size or 1))
+    return [tokens[index:index + size] for index in range(0, len(tokens), size)]
 
 
 def start_limited_account_watcher(stop_event: Event) -> Thread:
-    interval_seconds = config.refresh_account_interval_minute * 60
-
     def worker() -> None:
         while not stop_event.is_set():
+            processed = 0
+            refreshed = 0
+            errors: list[object] = []
             try:
                 limited_tokens = account_service.list_limited_tokens()
                 normal_tokens = account_service.list_normal_tokens()
                 expiring_tokens = account_service.list_expiring_access_tokens()
                 keepalive_tokens = account_service.list_refresh_token_keepalive_tokens()
-                tokens = _account_watcher_refresh_tokens(limited_tokens, expiring_tokens)
+                tokens = list(dict.fromkeys(account_service.list_tokens()))
+                batches = _token_batches(tokens)
+                account_service.start_auto_refresh_status(
+                    total=len(tokens),
+                    batch_size=ACCOUNT_AUTO_REFRESH_BATCH_SIZE,
+                    batch_count=len(batches),
+                )
                 expiring_token_set = set(expiring_tokens)
                 keepalive_tokens = [token for token in keepalive_tokens if token not in expiring_token_set]
                 if tokens:
                     print(
-                        "[account-watcher] checking "
-                        f"{len(limited_tokens)} limited accounts, "
-                        f"{len(expiring_tokens)} expiring access tokens "
-                        f"(skipping {len(normal_tokens)} normal accounts)"
+                        "[account-watcher] refreshing "
+                        f"{len(tokens)} accounts in batches of {ACCOUNT_AUTO_REFRESH_BATCH_SIZE} "
+                        f"({len(normal_tokens)} normal, {len(limited_tokens)} limited, "
+                        f"{len(expiring_tokens)} expiring access tokens)"
                     )
-                    account_service.refresh_accounts(tokens)
+                    for batch_index, batch in enumerate(batches, start=1):
+                        if stop_event.is_set():
+                            break
+                        result = account_service.refresh_accounts(batch)
+                        processed += len(batch)
+                        refreshed += int(result.get("refreshed") or 0)
+                        batch_errors = result.get("errors") if isinstance(result, dict) else []
+                        if isinstance(batch_errors, list):
+                            errors.extend(batch_errors)
+                        account_service.update_auto_refresh_status(
+                            processed=processed,
+                            refreshed=refreshed,
+                            failed=len(errors),
+                            batch_index=batch_index,
+                        )
+                else:
+                    account_service.update_auto_refresh_status(processed=0, refreshed=0, failed=0, batch_index=0)
                 if keepalive_tokens:
                     print(f"[account-watcher] keepalive {len(keepalive_tokens)} refresh tokens")
                     result = account_service.keepalive_refresh_tokens(keepalive_tokens)
                     if result.get("errors"):
                         print(f"[account-watcher] keepalive errors: {result['errors']}")
+                interval_seconds = _account_refresh_interval_seconds()
+                stopped = stop_event.is_set() and processed < len(tokens)
+                account_service.finish_auto_refresh_status(
+                    success=not errors and not stopped,
+                    processed=processed,
+                    refreshed=refreshed,
+                    failed=len(errors),
+                    error="stopped" if stopped else "",
+                    next_run_at="" if stopped else _next_run_at(interval_seconds),
+                )
             except Exception as exc:
+                interval_seconds = _account_refresh_interval_seconds()
+                account_service.finish_auto_refresh_status(
+                    success=False,
+                    processed=processed,
+                    refreshed=refreshed,
+                    failed=len(errors),
+                    error=str(exc),
+                    next_run_at=_next_run_at(interval_seconds),
+                )
                 print(f"[account-watcher] fail {exc}")
+            interval_seconds = _account_refresh_interval_seconds()
             stop_event.wait(interval_seconds)
 
     thread = Thread(target=worker, name="account-watcher", daemon=True)

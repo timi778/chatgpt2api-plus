@@ -70,6 +70,7 @@ class AccountService:
         self._image_inflight: dict[str, int] = {}
         self._token_aliases: dict[str, str] = {}
         self._cumulative_total = self._load_cumulative_total()
+        self._auto_refresh_status = self._empty_auto_refresh_status()
 
     def _get_cumulative_file(self) -> Path:
         storage_path = getattr(self.storage, "file_path", None)
@@ -96,6 +97,30 @@ class AccountService:
     @staticmethod
     def _now() -> str:
         return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+    @staticmethod
+    def _now_iso() -> str:
+        return datetime.now(timezone.utc).isoformat()
+
+    @staticmethod
+    def _empty_auto_refresh_status() -> dict[str, Any]:
+        return {
+            "running": False,
+            "success": None,
+            "started_at": "",
+            "finished_at": "",
+            "updated_at": "",
+            "next_run_at": "",
+            "total": 0,
+            "processed": 0,
+            "refreshed": 0,
+            "failed": 0,
+            "batch_size": 0,
+            "batch_count": 0,
+            "batch_index": 0,
+            "duration_seconds": 0,
+            "error": "",
+        }
 
     @staticmethod
     def _decode_jwt_payload(token: str) -> dict:
@@ -1206,6 +1231,81 @@ class AccountService:
         """清理过期进度记录。"""
         with self._refresh_progress_lock:
             self._refresh_progress.pop(progress_id, None)
+
+    def start_auto_refresh_status(self, total: int, batch_size: int, batch_count: int) -> None:
+        now = self._now_iso()
+        with self._refresh_progress_lock:
+            self._auto_refresh_status.update({
+                "running": True,
+                "success": None,
+                "started_at": now,
+                "finished_at": "",
+                "updated_at": now,
+                "next_run_at": "",
+                "total": max(0, int(total or 0)),
+                "processed": 0,
+                "refreshed": 0,
+                "failed": 0,
+                "batch_size": max(0, int(batch_size or 0)),
+                "batch_count": max(0, int(batch_count or 0)),
+                "batch_index": 0,
+                "duration_seconds": 0,
+                "error": "",
+            })
+
+    def update_auto_refresh_status(
+        self,
+        *,
+        processed: int | None = None,
+        refreshed: int | None = None,
+        failed: int | None = None,
+        batch_index: int | None = None,
+    ) -> None:
+        updates: dict[str, Any] = {"updated_at": self._now_iso()}
+        if processed is not None:
+            updates["processed"] = max(0, int(processed or 0))
+        if refreshed is not None:
+            updates["refreshed"] = max(0, int(refreshed or 0))
+        if failed is not None:
+            updates["failed"] = max(0, int(failed or 0))
+        if batch_index is not None:
+            updates["batch_index"] = max(0, int(batch_index or 0))
+        with self._refresh_progress_lock:
+            self._auto_refresh_status.update(updates)
+
+    def finish_auto_refresh_status(
+        self,
+        *,
+        success: bool,
+        processed: int,
+        refreshed: int,
+        failed: int,
+        error: str = "",
+        next_run_at: str = "",
+    ) -> None:
+        now = self._now_iso()
+        with self._refresh_progress_lock:
+            started_at = self._parse_time(self._auto_refresh_status.get("started_at"))
+            duration = 0
+            if started_at is not None:
+                duration = max(0, round((datetime.now(timezone.utc) - started_at).total_seconds(), 1))
+            self._auto_refresh_status.update({
+                "running": False,
+                "success": bool(success),
+                "finished_at": now,
+                "updated_at": now,
+                "next_run_at": str(next_run_at or ""),
+                "processed": max(0, int(processed or 0)),
+                "refreshed": max(0, int(refreshed or 0)),
+                "failed": max(0, int(failed or 0)),
+                "duration_seconds": duration,
+                "error": str(error or "")[:1000],
+            })
+
+    def get_auto_refresh_status(self) -> dict[str, Any]:
+        with self._refresh_progress_lock:
+            return dict(self._auto_refresh_status)
+
     def refresh_accounts(
         self,
         access_tokens: list[str],
@@ -1360,6 +1460,7 @@ class AccountService:
             "total_success": total_success,
             "total_fail": total_fail,
             "by_type": by_type,
+            "auto_refresh": self.get_auto_refresh_status(),
         }
 
     def account_health(self) -> dict:

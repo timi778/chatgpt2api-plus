@@ -27,6 +27,7 @@ export function useDashboardPage() {
   }
   type RenderMode = 'initial' | 'range' | 'refresh'
   type ChartType = 'hourlyRequests' | 'trend' | 'successRate' | 'model' | 'modelRank' | 'responseTime'
+  type AutoRefreshTone = 'success' | 'danger' | 'warning' | 'info' | 'muted'
   type OverviewPayload = Record<string, any>
   const chartRangeRequestSeq: Record<ChartType, number> = {
     hourlyRequests: 0,
@@ -116,6 +117,17 @@ export function useDashboardPage() {
   }
 
   const stats = ref(createDefaultStats())
+  const autoRefreshStatus = ref({
+    tone: 'muted' as AutoRefreshTone,
+    icon: 'lucide:refresh-cw',
+    running: false,
+    label: '尚未执行',
+    cardMeta: '自动刷新尚未执行',
+    timeText: '还没有自动刷新记录',
+    summaryText: '等待定时任务启动',
+    detailText: '',
+    nextRunText: '',
+  })
 
   // 每个图表独立的数据状态
   function createEmptyChartData() {
@@ -501,8 +513,107 @@ export function useDashboardPage() {
     return Math.max(0, Math.trunc(number)).toLocaleString('zh-CN')
   }
 
+  function cleanText(value: unknown) {
+    return String(value || '').trim()
+  }
+
+  function formatAutoRefreshTime(value: unknown) {
+    const raw = cleanText(value)
+    if (!raw) return ''
+    const date = new Date(raw)
+    if (Number.isNaN(date.getTime())) {
+      return raw.replace('T', ' ').slice(0, 19)
+    }
+    return new Intl.DateTimeFormat('zh-CN', {
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).format(date)
+  }
+
+  function formatDuration(seconds: unknown) {
+    const value = Number(seconds || 0)
+    if (!Number.isFinite(value) || value <= 0) return ''
+    if (value < 60) return `${Math.round(value)} 秒`
+    const minutes = Math.floor(value / 60)
+    const rest = Math.round(value % 60)
+    return rest ? `${minutes} 分 ${rest} 秒` : `${minutes} 分钟`
+  }
+
+  function applyAutoRefreshStatus(rawStatus: unknown) {
+    const status = rawStatus && typeof rawStatus === 'object' ? rawStatus as Record<string, any> : {}
+    const running = Boolean(status.running)
+    const success = status.success
+    const total = Math.max(0, Number(status.total || 0))
+    const processed = Math.max(0, Number(status.processed || 0))
+    const refreshed = Math.max(0, Number(status.refreshed || 0))
+    const failed = Math.max(0, Number(status.failed || 0))
+    const batchSize = Math.max(0, Number(status.batch_size || 0))
+    const duration = formatDuration(status.duration_seconds)
+    const startedAt = formatAutoRefreshTime(status.started_at)
+    const finishedAt = formatAutoRefreshTime(status.finished_at)
+    const nextRunAt = formatAutoRefreshTime(status.next_run_at)
+    const error = cleanText(status.error)
+    const hasHistory = Boolean(startedAt || finishedAt)
+
+    let tone: AutoRefreshTone = 'muted'
+    let icon = 'lucide:refresh-cw'
+    let label = '尚未执行'
+    let cardMeta = '自动刷新尚未执行'
+    let timeText = '还没有自动刷新记录'
+    let summaryText = '等待定时任务启动'
+    let detailText = ''
+
+    if (running) {
+      tone = 'info'
+      label = '刷新中'
+      cardMeta = `自动刷新中 ${processed}/${total}`
+      timeText = startedAt ? `开始于 ${startedAt}` : '正在刷新账号'
+      summaryText = `已处理 ${processed}/${total} 个账号${batchSize ? `，每批 ${batchSize} 个` : ''}`
+      detailText = failed ? `当前失败 ${failed} 个` : ''
+    } else if (success === true) {
+      tone = 'success'
+      icon = 'lucide:circle-check'
+      label = '成功'
+      cardMeta = finishedAt ? `上次自动刷新 ${finishedAt}` : '自动刷新成功'
+      timeText = finishedAt ? `完成于 ${finishedAt}` : '自动刷新已完成'
+      summaryText = `刷新 ${refreshed}/${total} 个账号，失败 ${failed} 个`
+      detailText = duration ? `耗时 ${duration}` : ''
+    } else if (success === false || error) {
+      tone = failed > 0 && processed > 0 ? 'warning' : 'danger'
+      icon = 'lucide:circle-alert'
+      label = failed > 0 && processed > 0 ? '部分失败' : '失败'
+      cardMeta = finishedAt ? `上次自动刷新异常 ${finishedAt}` : '自动刷新失败'
+      timeText = finishedAt ? `完成于 ${finishedAt}` : (startedAt ? `开始于 ${startedAt}` : '自动刷新失败')
+      summaryText = `已处理 ${processed}/${total} 个账号，失败 ${failed} 个`
+      detailText = error || (duration ? `耗时 ${duration}` : '')
+    } else if (hasHistory) {
+      tone = 'muted'
+      label = '未知'
+      cardMeta = finishedAt ? `上次自动刷新 ${finishedAt}` : '自动刷新状态未知'
+      timeText = finishedAt ? `完成于 ${finishedAt}` : `开始于 ${startedAt}`
+      summaryText = `已处理 ${processed}/${total} 个账号`
+    }
+
+    autoRefreshStatus.value = {
+      tone,
+      icon,
+      running,
+      label,
+      cardMeta,
+      timeText,
+      summaryText,
+      detailText,
+      nextRunText: nextRunAt ? `下次 ${nextRunAt}` : '',
+    }
+  }
+
   function applyAccountStats(overview: OverviewPayload) {
+    applyAutoRefreshStatus(overview.auto_refresh)
     stats.value[0].value = formatStatNumber(overview.total_accounts)
+    stats.value[0].meta = autoRefreshStatus.value.cardMeta
     stats.value[1].value = formatStatNumber(overview.active_accounts)
     stats.value[2].value = formatStatNumber(overview.rate_limited_accounts)
     stats.value[3].value = formatStatNumber(overview.abnormal_accounts)
@@ -1064,6 +1175,7 @@ export function useDashboardPage() {
 
   return {
     stats,
+    autoRefreshStatus,
     dashboardDataReady,
     timeRangeHourlyRequests,
     timeRangeTrend,
