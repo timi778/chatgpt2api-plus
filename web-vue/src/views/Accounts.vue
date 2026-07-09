@@ -126,7 +126,7 @@
                 <EmptyState
                   plain
                   title="暂无账号数据"
-                  description="可以先导入 Access Token、Session JSON 或 CPA JSON 文件。"
+                  description="可以先用 OAuth 登录已有账号，也可以导入 Access Token、Session JSON 或 CPA JSON 文件。"
                 />
               </td>
             </tr>
@@ -156,7 +156,7 @@
           <EmptyState
             plain
             title="暂无账号数据"
-            description="可以先导入 Access Token、Session JSON 或 CPA JSON 文件。"
+            description="可以先用 OAuth 登录已有账号，也可以导入 Access Token、Session JSON 或 CPA JSON 文件。"
           />
         </div>
 
@@ -519,7 +519,66 @@
               </div>
 
               <div class="min-h-[26rem] p-4">
-                <div v-if="importMode === 'access_token'" class="space-y-3">
+                <div v-if="importMode === 'oauth_login'" class="space-y-3">
+                  <ImportModePanel
+                    title="OAuth 登录已有账号（带自动刷新）"
+                    description="用浏览器登录自己的 ChatGPT 账号，回填 callback URL 后导入 refresh_token。"
+                  />
+                  <div class="grid grid-cols-1 gap-3">
+                    <label class="block text-xs">
+                      <span class="ui-field-label">账号邮箱（可选）</span>
+                      <Input
+                        :model-value="oauthEmailHint"
+                        type="email"
+                        block
+                        placeholder="name@example.com"
+                        :disabled="importBusy"
+                        @update:model-value="oauthEmailHint = $event.trim()"
+                      />
+                    </label>
+
+                    <div class="flex flex-wrap gap-2">
+                      <Button size="xs" variant="primary" :disabled="importBusy" @click="startOAuthLogin">
+                        {{ oauthAuthorizeUrl ? '重新生成授权链接' : '生成并打开授权页面' }}
+                      </Button>
+                      <Button v-if="oauthAuthorizeUrl" size="xs" variant="outline" :disabled="importBusy" @click="openOAuthAuthorizeUrl">
+                        打开授权页面
+                      </Button>
+                      <Button v-if="oauthAuthorizeUrl" size="xs" variant="outline" :disabled="importBusy" @click="copyOAuthAuthorizeUrl">
+                        复制授权链接
+                      </Button>
+                    </div>
+
+                    <SurfaceBox v-if="oauthAuthorizeUrl" tone="muted" density="compact" wrap>
+                      授权链接已生成。登录完成后，把浏览器最终跳转到的 callback URL 粘贴到下方。
+                      <span v-if="oauthRedirectUriPrefix">目标地址：{{ oauthRedirectUriPrefix }}</span>
+                    </SurfaceBox>
+
+                    <label class="block text-xs">
+                      <span class="ui-field-label">Callback URL / Code</span>
+                      <textarea
+                        v-model.trim="oauthCallbackText"
+                        rows="5"
+                        class="ui-textarea-sm font-mono"
+                        placeholder="粘贴完整 callback URL，或只粘贴 code"
+                        :disabled="importBusy || !oauthSessionId"
+                      ></textarea>
+                    </label>
+
+                    <div class="flex justify-end">
+                      <Button
+                        size="xs"
+                        variant="primary"
+                        :disabled="importBusy || !oauthSessionId || !oauthCallbackText.trim()"
+                        @click="finishOAuthLogin"
+                      >
+                        {{ importBusy ? '导入中...' : '完成导入' }}
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+
+                <div v-else-if="importMode === 'access_token'" class="space-y-3">
                   <ImportModePanel
                     title="导入 Access Token"
                     description="支持直接粘贴，一行一个；也支持从 TXT 文件读取，一行一个。"
@@ -692,6 +751,11 @@ const {
   showImportModal,
   importMode,
   importModeOptions,
+  oauthEmailHint,
+  oauthCallbackText,
+  oauthSessionId,
+  oauthAuthorizeUrl,
+  oauthRedirectUriPrefix,
   manualTokenText,
   sessionJsonText,
   accountGroups,
@@ -755,6 +819,10 @@ const {
   importManualTokenText,
   importTokenTextFile,
   importSessionJson,
+  startOAuthLogin,
+  openOAuthAuthorizeUrl,
+  copyOAuthAuthorizeUrl,
+  finishOAuthLogin,
   importLocalCPAFiles,
   refreshAllAccounts,
   requestStopRefreshProgress,

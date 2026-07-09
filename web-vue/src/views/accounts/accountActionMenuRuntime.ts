@@ -41,6 +41,7 @@ type AccountActionMenuRuntimeOptions = {
 const BIND_ACCOUNT_GROUP_ACTION_PREFIX = 'bind_group:'
 
 const accountImportActions = new Set<AccountImportMode>([
+  'oauth_login',
   'access_token',
   'session_json',
   'cpa_json',
@@ -99,6 +100,7 @@ export function useAccountActionMenuRuntime(options: AccountActionMenuRuntimeOpt
       { key: 'create', label: '手动添加账号' },
     ],
     [
+      { key: 'oauth_login', label: 'OAuth 登录已有账号' },
       { key: 'access_token', label: '导入 Access Token' },
       { key: 'session_json', label: '导入 Session JSON' },
       { key: 'cpa_json', label: '导入 CPA JSON 文件' },

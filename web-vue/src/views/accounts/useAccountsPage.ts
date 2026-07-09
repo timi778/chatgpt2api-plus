@@ -224,6 +224,11 @@ export function useAccountsPage() {
   const showImportModal = accountImport.showImportModal
   const importMode = accountImport.importMode
   const importModeOptions = accountImport.importModeOptions
+  const oauthEmailHint = accountImport.oauthEmailHint
+  const oauthCallbackText = accountImport.oauthCallbackText
+  const oauthSessionId = accountImport.oauthSessionId
+  const oauthAuthorizeUrl = accountImport.oauthAuthorizeUrl
+  const oauthRedirectUriPrefix = accountImport.oauthRedirectUriPrefix
   const manualTokenText = accountImport.manualTokenText
   const sessionJsonText = accountImport.sessionJsonText
 
@@ -278,6 +283,10 @@ export function useAccountsPage() {
   const importManualTokenText = accountImport.importManualTokenText
   const importTokenTextFile = accountImport.importTokenTextFile
   const importSessionJson = accountImport.importSessionJson
+  const startOAuthLogin = accountImport.startOAuthLogin
+  const openOAuthAuthorizeUrl = accountImport.openOAuthAuthorizeUrl
+  const copyOAuthAuthorizeUrl = accountImport.copyOAuthAuthorizeUrl
+  const finishOAuthLogin = accountImport.finishOAuthLogin
   const importLocalCPAFiles = accountImport.importLocalCPAFiles
 
   function closeRefreshProgress() {
@@ -353,6 +362,11 @@ export function useAccountsPage() {
     showImportModal,
     importMode,
     importModeOptions,
+    oauthEmailHint,
+    oauthCallbackText,
+    oauthSessionId,
+    oauthAuthorizeUrl,
+    oauthRedirectUriPrefix,
     manualTokenText,
     sessionJsonText,
     accountGroups,
@@ -415,6 +429,10 @@ export function useAccountsPage() {
     importManualTokenText,
     importTokenTextFile,
     importSessionJson,
+    startOAuthLogin,
+    openOAuthAuthorizeUrl,
+    copyOAuthAuthorizeUrl,
+    finishOAuthLogin,
     importLocalCPAFiles,
     refreshAllAccounts,
     refreshSelectedAccounts,

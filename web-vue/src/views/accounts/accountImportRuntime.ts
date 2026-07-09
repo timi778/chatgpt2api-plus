@@ -1,11 +1,12 @@
 import { ref } from 'vue'
 
 import { accountsApi } from '@/api/accounts'
+import { accountImportsApi } from '@/api/accountImports'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import { useToast } from '@/composables/useToast'
 import type { useAccountBulkProgressRuntime } from './accountBulkProgressRuntime'
 
-export type AccountImportMode = 'access_token' | 'session_json' | 'cpa_json' | 'remote_cpa' | 'sub2api'
+export type AccountImportMode = 'oauth_login' | 'access_token' | 'session_json' | 'cpa_json' | 'remote_cpa' | 'sub2api'
 
 const IMPORT_BATCH_SIZE = 20
 
@@ -77,12 +78,18 @@ export function useAccountImportRuntime(options: AccountImportRuntimeOptions) {
   const importBusy = ref(false)
   const showImportModal = ref(false)
   const importMode = ref<AccountImportMode>('access_token')
+  const oauthEmailHint = ref('')
+  const oauthCallbackText = ref('')
+  const oauthSessionId = ref('')
+  const oauthAuthorizeUrl = ref('')
+  const oauthRedirectUriPrefix = ref('')
   const manualTokenText = ref('')
   const sessionJsonText = ref('')
   const toast = useToast()
   const confirmDialog = useConfirmDialog()
 
   const importModeOptions = [
+    { label: 'OAuth 登录已有账号', value: 'oauth_login' },
     { label: '导入 Access Token', value: 'access_token' },
     { label: '导入 Session JSON', value: 'session_json' },
     { label: '导入 CPA JSON 文件', value: 'cpa_json' },
@@ -242,6 +249,85 @@ export function useAccountImportRuntime(options: AccountImportRuntimeOptions) {
     await importTokenBatch(parseSessionJsonTokens(sessionJsonText.value), 'session_json', '导入 Session JSON')
   }
 
+  async function startOAuthLogin() {
+    importBusy.value = true
+    try {
+      const result = await accountImportsApi.startOAuthLogin(oauthEmailHint.value)
+      oauthSessionId.value = String(result.session_id || '')
+      oauthAuthorizeUrl.value = String(result.authorize_url || '')
+      oauthRedirectUriPrefix.value = String(result.redirect_uri_prefix || '')
+      oauthCallbackText.value = ''
+      if (!oauthSessionId.value || !oauthAuthorizeUrl.value) {
+        throw new Error('后端没有返回完整的 OAuth 授权会话')
+      }
+      window.open(oauthAuthorizeUrl.value, '_blank', 'noopener,noreferrer')
+      toast.success('OAuth 授权链接已生成')
+    } catch (error) {
+      options.setError('生成 OAuth 授权链接失败', error)
+    } finally {
+      importBusy.value = false
+    }
+  }
+
+  function openOAuthAuthorizeUrl() {
+    if (!oauthAuthorizeUrl.value) {
+      void startOAuthLogin()
+      return
+    }
+    window.open(oauthAuthorizeUrl.value, '_blank', 'noopener,noreferrer')
+  }
+
+  async function copyOAuthAuthorizeUrl() {
+    const value = oauthAuthorizeUrl.value.trim()
+    if (!value) {
+      toast.warning('请先生成 OAuth 授权链接')
+      return
+    }
+    try {
+      await navigator.clipboard.writeText(value)
+      toast.success('授权链接已复制')
+    } catch (error) {
+      options.setError('复制 OAuth 授权链接失败', error)
+    }
+  }
+
+  async function finishOAuthLogin() {
+    const sessionId = oauthSessionId.value.trim()
+    const callback = oauthCallbackText.value.trim()
+    if (!sessionId) {
+      toast.warning('请先生成 OAuth 授权链接')
+      return
+    }
+    if (!callback) {
+      toast.warning('请先粘贴 callback URL 或 code')
+      return
+    }
+
+    importBusy.value = true
+    try {
+      const result = await accountImportsApi.finishOAuthLogin(sessionId, callback)
+      await options.loadData({ silentErrorToast: true })
+      const added = Number(result.added || 0)
+      const skipped = Number(result.skipped || 0)
+      const refreshed = Number(result.refreshed || 0)
+      const errors = Array.isArray(result.errors) ? result.errors.length : 0
+      if (errors > 0) {
+        toast.warning(`OAuth 登录导入完成：新增 ${added}，跳过 ${skipped}，刷新 ${refreshed}，异常 ${errors}`)
+      } else {
+        toast.success(`OAuth 登录导入完成：新增 ${added}，跳过 ${skipped}，刷新 ${refreshed}`)
+      }
+      oauthEmailHint.value = ''
+      oauthCallbackText.value = ''
+      oauthSessionId.value = ''
+      oauthAuthorizeUrl.value = ''
+      oauthRedirectUriPrefix.value = ''
+    } catch (error) {
+      options.setError('OAuth 登录导入失败', error)
+    } finally {
+      importBusy.value = false
+    }
+  }
+
   async function importLocalCPAFiles(files: FileList | File[] | null | undefined) {
     const fileList = Array.from(files || [])
     if (!fileList.length) return
@@ -266,6 +352,11 @@ export function useAccountImportRuntime(options: AccountImportRuntimeOptions) {
     showImportModal,
     importMode,
     importModeOptions,
+    oauthEmailHint,
+    oauthCallbackText,
+    oauthSessionId,
+    oauthAuthorizeUrl,
+    oauthRedirectUriPrefix,
     manualTokenText,
     sessionJsonText,
     setImportMode,
@@ -274,6 +365,10 @@ export function useAccountImportRuntime(options: AccountImportRuntimeOptions) {
     importManualTokenText,
     importTokenTextFile,
     importSessionJson,
+    startOAuthLogin,
+    openOAuthAuthorizeUrl,
+    copyOAuthAuthorizeUrl,
+    finishOAuthLogin,
     importLocalCPAFiles,
   }
 }
