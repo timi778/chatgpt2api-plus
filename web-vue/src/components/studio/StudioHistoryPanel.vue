@@ -27,83 +27,101 @@
       <input v-model="query" placeholder="搜索对话" />
     </label>
 
-    <div class="studio-history-list custom-scrollbar">
+    <div ref="historyListRef" class="studio-history-list custom-scrollbar" @scroll="handleWindowScroll">
       <div
-        v-for="conversation in filteredConversations"
+        v-if="topSpacerHeight > 0"
+        class="studio-history-window-spacer"
+        :style="{ height: `${topSpacerHeight}px` }"
+        aria-hidden="true"
+      ></div>
+      <div
+        v-for="{ item: conversation } in visibleConversationEntries"
         :key="conversation.id"
-        v-memo="historyItemMemo(conversation)"
-        class="studio-history-item"
-        :class="{
-          'is-active': conversation.id === activeConversationId,
-          'is-draggable': canDrag,
-          'is-dragging': draggedId === conversation.id,
-          'is-drop-target': dropTargetId === conversation.id,
-        }"
-        :draggable="canDrag"
-        @dragstart="handleDragStart($event, conversation.id)"
-        @dragover="handleDragOver($event, conversation.id)"
-        @dragleave="handleDragLeave(conversation.id)"
-        @drop="handleDrop($event, conversation.id)"
-        @dragend="handleDragEnd"
+        class="studio-history-window-row"
+        :class="{ 'has-badge': badges[conversation.id] }"
       >
-        <form
-          v-if="editingId === conversation.id"
-          class="studio-history-edit"
-          @submit.prevent="commitRename(conversation.id)"
-          @click.stop
+        <div
+          v-memo="historyItemMemo(conversation)"
+          class="studio-history-item"
+          :class="{
+            'is-active': conversation.id === activeConversationId,
+            'is-draggable': canDrag,
+            'is-dragging': draggedId === conversation.id,
+            'is-drop-target': dropTargetId === conversation.id,
+          }"
+          :draggable="canDrag"
+          @dragstart="handleDragStart($event, conversation.id)"
+          @dragover="handleDragOver($event, conversation.id)"
+          @dragleave="handleDragLeave(conversation.id)"
+          @drop="handleDrop($event, conversation.id)"
+          @dragend="handleDragEnd"
         >
-          <input
-            ref="editInputRef"
-            v-model="editingTitle"
-            maxlength="80"
-            aria-label="对话标题"
-            @keydown.esc.prevent="cancelRename"
-            @blur="commitRename(conversation.id)"
-          />
-        </form>
-        <button
-          v-else
-          type="button"
-          class="studio-history-main"
-          :aria-current="conversation.id === activeConversationId ? 'true' : undefined"
-          @click="handleSelect(conversation.id)"
-          @dblclick.stop="beginRename(conversation)"
-        >
-          <span class="studio-history-title">{{ conversation.title || '未命名对话' }}</span>
-          <span class="studio-history-meta">
-            <span>{{ conversation.messages.length ? `${conversation.messages.length} 条` : '空对话' }}</span>
-            <span aria-hidden="true">·</span>
-            <span>{{ formatConversationTime(conversation) }}</span>
-          </span>
-          <span
-            v-if="badges[conversation.id]"
-            class="studio-history-badge"
-            :class="`is-${badges[conversation.id].state}`"
+          <form
+            v-if="editingId === conversation.id"
+            class="studio-history-edit"
+            @submit.prevent="commitRename(conversation.id)"
+            @click.stop
           >
-            {{ badges[conversation.id].label }}
-          </span>
-        </button>
-        <div v-if="editingId !== conversation.id" class="studio-history-row-actions">
+            <input
+              ref="editInputRef"
+              v-model="editingTitle"
+              maxlength="80"
+              aria-label="对话标题"
+              @keydown.esc.prevent="cancelRename"
+              @blur="commitRename(conversation.id)"
+            />
+          </form>
           <button
+            v-else
             type="button"
-            class="studio-history-icon"
-            title="重命名"
-            aria-label="重命名对话"
-            @click.stop="beginRename(conversation)"
+            class="studio-history-main"
+            :aria-current="conversation.id === activeConversationId ? 'true' : undefined"
+            @click="handleSelect(conversation.id)"
+            @dblclick.stop="beginRename(conversation)"
           >
-            <Icon icon="lucide:pencil" class="h-3 w-3" />
+            <span class="studio-history-title">{{ conversation.title || '未命名对话' }}</span>
+            <span class="studio-history-meta">
+              <span>{{ conversation.messages.length ? `${conversation.messages.length} 条` : '空对话' }}</span>
+              <span aria-hidden="true">·</span>
+              <span>{{ formatConversationTime(conversation) }}</span>
+            </span>
+            <span
+              v-if="badges[conversation.id]"
+              class="studio-history-badge"
+              :class="`is-${badges[conversation.id].state}`"
+            >
+              {{ badges[conversation.id].label }}
+            </span>
           </button>
-          <button
-            type="button"
-            class="studio-history-icon is-danger"
-            title="删除对话"
-            aria-label="删除对话"
-            @click.stop="$emit('delete', conversation.id)"
-          >
-            <Icon icon="lucide:trash-2" class="h-3 w-3" />
-          </button>
+          <div v-if="editingId !== conversation.id" class="studio-history-row-actions">
+            <button
+              type="button"
+              class="studio-history-icon"
+              title="重命名"
+              aria-label="重命名对话"
+              @click.stop="beginRename(conversation)"
+            >
+              <Icon icon="lucide:pencil" class="h-3 w-3" />
+            </button>
+            <button
+              type="button"
+              class="studio-history-icon is-danger"
+              title="删除对话"
+              aria-label="删除对话"
+              @click.stop="$emit('delete', conversation.id)"
+            >
+              <Icon icon="lucide:trash-2" class="h-3 w-3" />
+            </button>
+          </div>
         </div>
       </div>
+
+      <div
+        v-if="bottomSpacerHeight > 0"
+        class="studio-history-window-spacer"
+        :style="{ height: `${bottomSpacerHeight}px` }"
+        aria-hidden="true"
+      ></div>
 
       <div v-if="!filteredConversations.length" class="studio-history-empty">
         {{ query.trim() ? '没有匹配的对话' : '输入提示词后会在这里显示对话历史。' }}
@@ -115,7 +133,8 @@
 <script setup lang="ts">
 import { Icon } from '@iconify/vue'
 import { Button } from 'nanocat-ui'
-import { computed, nextTick, ref } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
+import { useWindowedList } from '@/composables/useWindowedList'
 import type { StudioConversation, StudioConversationBadge } from './types'
 
 const props = defineProps<{
@@ -136,6 +155,7 @@ const emit = defineEmits<{
 const editingId = ref('')
 const editingTitle = ref('')
 const editInputRef = ref<HTMLInputElement | null>(null)
+const historyListRef = ref<HTMLElement | null>(null)
 const query = ref('')
 const draggedId = ref('')
 const dropTargetId = ref('')
@@ -163,6 +183,31 @@ const filteredConversations = computed(() => {
   return props.conversations.filter((conversation) => {
     return conversationSearchText(conversation).includes(keyword)
   })
+})
+const shouldWindowHistory = computed(() => {
+  return !query.value.trim()
+    && !editingId.value
+    && !draggedId.value
+    && filteredConversations.value.length > 36
+})
+const {
+  visibleItems: visibleConversationEntries,
+  topSpacerHeight,
+  bottomSpacerHeight,
+  handleScroll: handleWindowScroll,
+  setScrollElement: setHistoryScrollElement,
+  refreshWindow: refreshHistoryWindow,
+} = useWindowedList({
+  items: filteredConversations,
+  itemHeight: 58,
+  getItemHeight: (conversation) => props.badges[conversation.id] ? 76 : 58,
+  overscan: 8,
+  disabled: computed(() => !shouldWindowHistory.value),
+})
+
+watch(historyListRef, (element) => setHistoryScrollElement(element), { flush: 'post' })
+watch(shouldWindowHistory, () => {
+  void nextTick(refreshHistoryWindow)
 })
 
 function historyItemMemo(conversation: StudioConversation) {
@@ -352,7 +397,11 @@ function formatConversationTime(conversation: StudioConversation) {
 }
 
 .studio-history-search input::placeholder {
-  color: hsl(var(--muted-foreground));
+  color: hsl(var(--muted-foreground) / 0.62);
+  font-family: inherit;
+  font-weight: 400;
+  letter-spacing: 0;
+  opacity: 1;
 }
 
 .studio-history-list {
@@ -360,8 +409,26 @@ function formatConversationTime(conversation: StudioConversation) {
   min-height: 0;
   flex: 1;
   flex-direction: column;
-  gap: 0.25rem;
   overflow-y: auto;
+}
+
+.studio-history-window-spacer {
+  flex: 0 0 auto;
+  min-height: 0;
+  pointer-events: none;
+}
+
+.studio-history-window-row {
+  display: flex;
+  min-height: 0;
+  height: 3.625rem;
+  flex: 0 0 3.625rem;
+  padding-bottom: 0.25rem;
+}
+
+.studio-history-window-row.has-badge {
+  height: 4.75rem;
+  flex-basis: 4.75rem;
 }
 
 .studio-history-item {
@@ -377,6 +444,10 @@ function formatConversationTime(conversation: StudioConversation) {
   padding: 0.5rem 0.625rem;
   color: hsl(var(--foreground));
   transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
+}
+
+.studio-history-window-row.has-badge .studio-history-item {
+  min-height: 4.25rem;
 }
 
 .studio-history-item.is-draggable {
@@ -405,11 +476,13 @@ function formatConversationTime(conversation: StudioConversation) {
 }
 
 .studio-history-main {
-  display: grid;
+  display: flex;
   min-width: 0;
   flex: 1 1 auto;
-  align-content: center;
-  row-gap: 0.1875rem;
+  min-height: 0;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0.1875rem;
   padding-right: 3.25rem;
   text-align: left;
 }
@@ -507,10 +580,13 @@ function formatConversationTime(conversation: StudioConversation) {
 
 .studio-history-badge {
   width: fit-content;
+  max-width: 100%;
   border-radius: 999px;
   padding: 0.125rem 0.5rem;
   font-size: 0.6875rem;
   font-weight: 650;
+  line-height: 1rem;
+  white-space: nowrap;
 }
 
 .studio-history-badge.is-running {

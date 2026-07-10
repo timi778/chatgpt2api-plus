@@ -14,22 +14,18 @@
     </div>
     <div v-if="showClose || $slots.actions" class="modal-header__actions">
       <slot name="actions" />
-      <Button
+      <ModalCloseButton
         v-if="showClose"
-        size="xs"
-        variant="outline"
-        root-class="min-w-14 justify-center text-muted-foreground"
+        :label="closeText"
         :disabled="closeDisabled"
         @click="$emit('close')"
-      >
-        {{ closeText }}
-      </Button>
+      />
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { Button } from 'nanocat-ui'
+import ModalCloseButton from './ModalCloseButton.vue'
 
 withDefaults(defineProps<{
   title?: string
@@ -105,11 +101,14 @@ defineEmits<{
 @media (max-width: 640px) {
   .modal-header {
     align-items: flex-start;
-    flex-direction: column;
+  }
+
+  .modal-header__copy {
+    flex: 1;
   }
 
   .modal-header__actions {
-    width: 100%;
+    flex: 0 0 auto;
   }
 }
 </style>

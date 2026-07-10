@@ -1,5 +1,7 @@
-import { nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
+import { nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { statsApi } from '@/api/stats'
+import { usePageQuery } from '@/composables/usePageQuery'
+import { usePageRuntime } from '@/composables/usePageRuntime'
 import {
   getLineChartTheme,
   getPieChartTheme,
@@ -29,14 +31,15 @@ export function useDashboardPage() {
   type ChartType = 'hourlyRequests' | 'trend' | 'successRate' | 'model' | 'modelRank' | 'responseTime'
   type AutoRefreshTone = 'success' | 'danger' | 'warning' | 'info' | 'muted'
   type OverviewPayload = Record<string, any>
-  const chartRangeRequestSeq: Record<ChartType, number> = {
-    hourlyRequests: 0,
-    trend: 0,
-    successRate: 0,
-    model: 0,
-    modelRank: 0,
-    responseTime: 0,
-  }
+  const pageRuntime = usePageRuntime('dashboard')
+  const DASHBOARD_DATA_REQUEST_KEY = 'dashboard:data'
+  const CHART_BOOTSTRAP_TIMER_KEY = 'dashboard:chart-bootstrap'
+  const chartRequestKey = (chartType: ChartType) => `dashboard:chart:${chartType}`
+  const dashboardDataQuery = usePageQuery({
+    runtime: pageRuntime,
+    key: DASHBOARD_DATA_REQUEST_KEY,
+    errorMessage: '概览加载失败',
+  })
 
   // 每个图表独立的时间范围
   const timeRangeHourlyRequests = ref<DashboardTimeRange>(DEFAULT_DASHBOARD_TIME_RANGE)
@@ -49,7 +52,8 @@ export function useDashboardPage() {
   // 创建图表监听器的工厂函数
   function createChartWatcher(chartType: ChartType, updateFn: (mode?: RenderMode) => void) {
     return async (newVal: DashboardTimeRange) => {
-      const requestId = ++chartRangeRequestSeq[chartType]
+      if (!pageRuntime.canRun.value) return
+      const requestId = pageRuntime.nextRequest(chartRequestKey(chartType))
       const applied = await loadChartData(chartType, newVal, requestId)
       if (applied) updateFn('range')
     }
@@ -166,8 +170,6 @@ export function useDashboardPage() {
 
   const overviewCache = new Map<string, OverviewPayload>()
   const overviewRequests = new Map<string, Promise<OverviewPayload>>()
-  let dashboardDataRequestSeq = 0
-  const DASHBOARD_REFRESH_TTL_MS = 30000
 
   const trendChartRef = ref<HTMLDivElement | null>(null)
   const modelChartRef = ref<HTMLDivElement | null>(null)
@@ -206,10 +208,7 @@ export function useDashboardPage() {
   })
   const chartsBootstrapped = ref(false)
   const dashboardDataReady = ref(false)
-  let chartBootstrapTimer: number | null = null
   let dashboardEntrySeq = 0
-  let firstActivationSkipped = false
-  let lastDashboardRefreshAt = 0
   const modelLayoutIsMobile = ref<boolean | null>(null)
 
   function bindResizeListener() {
@@ -270,15 +269,6 @@ export function useDashboardPage() {
     chartsBootstrapped.value = true
   }
 
-  function updateAllCharts(mode: RenderMode = 'refresh') {
-    updateTrendChart(mode)
-    updateModelChart(mode)
-    updateSuccessRateChart(mode)
-    updateHourlyRequestsChart(mode)
-    updateModelRankChart(mode)
-    updateResponseTimeChart(mode)
-  }
-
   function resetChartFirstRenderState() {
     chartFirstRenderState.value = {
       trend: true,
@@ -300,16 +290,13 @@ export function useDashboardPage() {
   }
 
   function clearChartBootstrapTimer() {
-    if (chartBootstrapTimer) {
-      window.clearTimeout(chartBootstrapTimer)
-      chartBootstrapTimer = null
-    }
+    pageRuntime.clearTimer(CHART_BOOTSTRAP_TIMER_KEY)
   }
 
   function cancelDashboardDataRequests(options: { clearRequests?: boolean } = {}) {
-    dashboardDataRequestSeq += 1
-    ;(Object.keys(chartRangeRequestSeq) as ChartType[]).forEach((chartType) => {
-      chartRangeRequestSeq[chartType] += 1
+    dashboardDataQuery.invalidate()
+    ;(['hourlyRequests', 'trend', 'successRate', 'model', 'modelRank', 'responseTime'] as ChartType[]).forEach((chartType) => {
+      pageRuntime.invalidateRequest(chartRequestKey(chartType))
     })
     if (options.clearRequests !== false) {
       overviewRequests.clear()
@@ -327,42 +314,42 @@ export function useDashboardPage() {
     modelLayoutIsMobile.value = null
   }
 
-  function pauseDashboardViewState() {
-    cancelDashboardDataRequests({ clearRequests: false })
-    clearChartBootstrapTimer()
-    modelLayoutIsMobile.value = null
-  }
-
   function scheduleChartBootstrap(delayMs = 80) {
     if (chartsBootstrapped.value) return
     clearChartBootstrapTimer()
-    chartBootstrapTimer = window.setTimeout(() => {
+    pageRuntime.setTimer(CHART_BOOTSTRAP_TIMER_KEY, delayMs, () => {
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
           bootstrapCharts()
         })
       })
-    }, delayMs)
+    })
   }
 
-  onMounted(async () => {
+  pageRuntime.onActivate(({ initial }) => {
     bindResizeListener()
-    await reloadDashboardOnEnter()
-  })
-
-  onActivated(() => {
-    bindResizeListener()
-    if (!firstActivationSkipped) {
-      firstActivationSkipped = true
+    if (initial) {
+      void reloadDashboardOnEnter()
       return
     }
-    void restoreDashboardOnEnter()
+    void reloadDashboardOnEnter()
   })
 
-  onDeactivated(() => {
+  pageRuntime.onDeactivate(() => {
     unbindResizeListener()
     dashboardEntrySeq += 1
-    pauseDashboardViewState()
+    resetDashboardViewState()
+  })
+
+  pageRuntime.onHide(() => {
+    unbindResizeListener()
+    dashboardEntrySeq += 1
+    resetDashboardViewState()
+  })
+
+  pageRuntime.onShow(() => {
+    bindResizeListener()
+    void reloadDashboardOnEnter()
   })
 
   onBeforeUnmount(() => {
@@ -476,10 +463,6 @@ export function useDashboardPage() {
   }
 
   async function getOverview(timeRange: string, options: { force?: boolean } = {}) {
-    if (options.force) {
-      overviewCache.delete(timeRange)
-    }
-
     if (!options.force) {
       const cached = overviewCache.get(timeRange)
       if (cached) return cached
@@ -709,9 +692,8 @@ export function useDashboardPage() {
     }
   }
 
-  async function refreshDashboardData(force = false) {
-    const requestSeq = ++dashboardDataRequestSeq
-    const chartRanges: Record<ChartType, DashboardTimeRange> = {
+  function getDashboardChartRanges(): Record<ChartType, DashboardTimeRange> {
+    return {
       hourlyRequests: timeRangeHourlyRequests.value,
       trend: timeRangeTrend.value,
       successRate: timeRangeSuccessRate.value,
@@ -719,35 +701,53 @@ export function useDashboardPage() {
       modelRank: timeRangeModelRank.value,
       responseTime: timeRangeResponseTime.value,
     }
+  }
 
-    try {
-      const initialRanges = Array.from(
-        new Set<string>([
-          DEFAULT_DASHBOARD_TIME_RANGE,
-          ...Object.values(chartRanges),
-        ])
-      )
+  function getDashboardOverviewRanges(chartRanges: Record<ChartType, DashboardTimeRange>) {
+    return Array.from(
+      new Set<string>([
+        DEFAULT_DASHBOARD_TIME_RANGE,
+        ...Object.values(chartRanges),
+      ])
+    )
+  }
 
-      await Promise.all(initialRanges.map((timeRange) => getOverview(timeRange, { force })))
+  async function loadDashboardOverviewRanges(chartRanges: Record<ChartType, DashboardTimeRange>, force: boolean) {
+    await Promise.all(
+      getDashboardOverviewRanges(chartRanges).map((timeRange) => getOverview(timeRange, { force }))
+    )
+  }
 
-      if (requestSeq !== dashboardDataRequestSeq) return false
-
-      const accountOverview = overviewCache.get(DEFAULT_DASHBOARD_TIME_RANGE)
-      if (accountOverview) {
-        applyAccountStats(accountOverview)
-      }
-
-      ;(['hourlyRequests', 'trend', 'successRate', 'model', 'modelRank', 'responseTime'] as ChartType[]).forEach((chartType) => {
-        if (chartRanges[chartType] !== getChartRange(chartType)) return
-        const overview = overviewCache.get(chartRanges[chartType])
-        if (overview) applyOverviewToChartData(chartType, overview)
-      })
-      lastDashboardRefreshAt = Date.now()
-      return true
-    } catch (error) {
-      console.error('Failed to refresh dashboard data:', error)
-      return false
+  function applyDashboardOverview(chartRanges: Record<ChartType, DashboardTimeRange>) {
+    const accountOverview = overviewCache.get(DEFAULT_DASHBOARD_TIME_RANGE)
+    if (accountOverview) {
+      applyAccountStats(accountOverview)
     }
+
+    ;(['hourlyRequests', 'trend', 'successRate', 'model', 'modelRank', 'responseTime'] as ChartType[]).forEach((chartType) => {
+      if (chartRanges[chartType] !== getChartRange(chartType)) return
+      const overview = overviewCache.get(chartRanges[chartType])
+      if (overview) applyOverviewToChartData(chartType, overview)
+    })
+  }
+
+  async function refreshDashboardData(force = false) {
+    const chartRanges = getDashboardChartRanges()
+
+    const refreshed = await dashboardDataQuery.run(
+      async () => {
+        await loadDashboardOverviewRanges(chartRanges, force)
+        return true
+      },
+      {
+        apply: () => applyDashboardOverview(chartRanges),
+        onError: (_message, error) => {
+          console.error('Failed to refresh dashboard data:', error)
+        },
+        silentError: true,
+      },
+    )
+    return Boolean(refreshed)
   }
 
   async function reloadDashboardOnEnter() {
@@ -762,37 +762,12 @@ export function useDashboardPage() {
     scheduleChartBootstrap(refreshed ? 0 : 80)
   }
 
-  async function restoreDashboardOnEnter() {
-    if (!dashboardDataReady.value) {
-      await reloadDashboardOnEnter()
-      return
-    }
-    const entrySeq = ++dashboardEntrySeq
-    await nextTick()
-    if (entrySeq !== dashboardEntrySeq) return
-    if (chartsBootstrapped.value) {
-      requestAnimationFrame(() => {
-        if (entrySeq === dashboardEntrySeq) handleResize()
-      })
-    } else {
-      scheduleChartBootstrap(80)
-    }
-    if (Date.now() - lastDashboardRefreshAt < DASHBOARD_REFRESH_TTL_MS) return
-    const refreshed = await refreshDashboardData(true)
-    if (entrySeq !== dashboardEntrySeq || !refreshed) return
-    if (chartsBootstrapped.value) {
-      updateAllCharts('refresh')
-    } else {
-      scheduleChartBootstrap(0)
-    }
-  }
-
   async function loadChartData(chartType: ChartType, timeRange: DashboardTimeRange, requestId?: number) {
     try {
       const overview = await getOverview(timeRange)
       if (
         requestId !== undefined &&
-        (requestId !== chartRangeRequestSeq[chartType] || timeRange !== getChartRange(chartType))
+        (!pageRuntime.isLatestRequest(chartRequestKey(chartType), requestId) || timeRange !== getChartRange(chartType))
       ) {
         return false
       }

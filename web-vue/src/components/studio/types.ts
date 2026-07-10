@@ -22,6 +22,8 @@ export interface StudioMessage {
   taskId?: string
   error?: string
   attachments?: string[]
+  referenceImages?: StudioReferenceImage[]
+  inpaintSource?: StudioImageCompareSource
   searchSources?: StudioSearchSource[]
   searchImageGroups?: StudioSearchImageGroup[]
 }
@@ -46,12 +48,34 @@ export interface StudioConversation {
   messages: StudioMessage[]
 }
 
-export interface StudioReference {
+export interface StudioReferenceImage {
   id: string
   name: string
   type: string
   size: number
   dataUrl: string
+}
+
+export interface StudioReference extends StudioReferenceImage {
+  previewDataUrl?: string
+}
+
+export interface StudioImageAssetView {
+  url: string
+  path: string
+  width?: number
+  height?: number
+}
+
+export interface StudioImageCompareSource {
+  src: string
+  name: string
+  localPath?: string
+}
+
+export interface StudioImageComparePreview {
+  before: StudioImageCompareSource
+  after: StudioImageCompareSource
 }
 
 export interface StudioImageForm {

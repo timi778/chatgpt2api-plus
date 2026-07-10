@@ -25,7 +25,7 @@ from utils.helper import (
     is_supported_image_model,
     split_image_model,
 )
-from utils.image_tokens import count_image_content_tokens
+from utils.image_tokens import count_image_content_tokens, image_size_from_bytes
 from utils.log import logger
 from utils.diagnostics import diagnostic_excerpt
 
@@ -724,17 +724,17 @@ def format_image_result(
         if not b64_json:
             continue
         revised_prompt = str(item.get("revised_prompt") or prompt).strip() or prompt
+        image_bytes = base64.b64decode(b64_json)
+        asset: dict[str, Any] = {
+            "url": save_image_bytes(image_bytes, base_url),
+            "revised_prompt": revised_prompt,
+        }
+        dimensions = image_size_from_bytes(image_bytes)
+        if dimensions:
+            asset["width"], asset["height"] = dimensions
         if response_format == "b64_json":
-            data.append({
-                "b64_json": b64_json,
-                "url": save_image_bytes(base64.b64decode(b64_json), base_url),
-                "revised_prompt": revised_prompt,
-            })
-        else:
-            data.append({
-                "url": save_image_bytes(base64.b64decode(b64_json), base_url),
-                "revised_prompt": revised_prompt,
-            })
+            asset["b64_json"] = b64_json
+        data.append(asset)
     result: dict[str, Any] = {"created": created or int(time.time()), "data": data}
     if message and not data:
         result["message"] = message
@@ -2457,13 +2457,6 @@ def _image_stream_payload(output: ImageOutput, event_type: str, payload: dict[st
     return item
 
 
-def _image_stream_partial_count(value: object) -> int:
-    try:
-        return max(0, int(value or 0))
-    except (TypeError, ValueError):
-        return 0
-
-
 def stream_image_chunks(
     outputs: Iterable[ImageOutput],
     event_prefix: str = "image_generation",
@@ -2471,7 +2464,8 @@ def stream_image_chunks(
     partial_images: object = 0,
 ) -> Iterator[dict[str, Any]]:
     prefix = str(event_prefix or "image_generation").strip() or "image_generation"
-    emit_partial = _image_stream_partial_count(partial_images) > 0
+    # ChatGPT Web only gives us final image bytes here. Emitting those bytes as a
+    # synthetic partial_image makes some clients display the same image twice.
     for output in outputs:
         if output.kind == "result":
             for item_index, item in enumerate(output.data):
@@ -2480,15 +2474,6 @@ def stream_image_chunks(
                 b64_json = str(item.get("b64_json") or "").strip()
                 if not b64_json:
                     continue
-                if emit_partial:
-                    yield _image_stream_payload(
-                        output,
-                        f"{prefix}.partial_image",
-                        {
-                            "b64_json": b64_json,
-                            "partial_image_index": max(0, item_index),
-                        },
-                    )
                 completed: dict[str, Any] = {"b64_json": b64_json}
                 if usage_builder:
                     usage = usage_builder([item])

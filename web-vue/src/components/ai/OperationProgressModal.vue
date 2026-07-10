@@ -29,9 +29,8 @@
       </p>
     </div>
 
-    <ModalFooter class="mt-6" :bordered="false" flush>
+    <ModalFooter v-if="busy && canCancel" class="mt-6" :bordered="false" flush>
       <Button v-if="busy && canCancel" size="sm" variant="outline" @click="$emit('cancel')">停止</Button>
-      <Button v-if="!busy" size="sm" variant="primary" @click="$emit('close')">完成</Button>
     </ModalFooter>
   </ModalShell>
 </template>

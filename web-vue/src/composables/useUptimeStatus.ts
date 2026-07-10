@@ -1,6 +1,8 @@
-import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref } from 'vue'
+import { computed, ref } from 'vue'
 import { monitorApi } from '@/api/monitor'
 import type { UptimeHeartbeat, UptimeResponse, UptimeService } from '@/types/api'
+import { usePageQuery, useSerialVisibilityPolling } from '@/composables/usePageQuery'
+import { usePageRuntime } from '@/composables/usePageRuntime'
 import { useToast } from '@/composables/useToast'
 
 type ServiceView = {
@@ -17,6 +19,8 @@ type ServiceView = {
 const slowThresholdMs = 40000
 const maxBeats = 60
 const AUTO_REFRESH_INTERVAL_MS = 15000
+const UPTIME_REQUEST_KEY = 'uptime:status'
+const UPTIME_REFRESH_TIMER_KEY = 'uptime:auto-refresh'
 
 const mapStatusLabel = (statusValue: UptimeService['status']) => {
   if (statusValue === 'up') return '正常'
@@ -62,12 +66,17 @@ const buildBeats = (heartbeats: UptimeHeartbeat[] = []) => {
 
 export function useUptimeStatus() {
   const toast = useToast()
+  const pageRuntime = usePageRuntime('uptime')
   const status = ref<UptimeResponse | null>(null)
   const errorMessage = ref('')
   const isLoading = ref(false)
-  const isPageActive = ref(false)
-  let autoRefreshTimer: number | null = null
-
+  const uptimeQuery = usePageQuery({
+    runtime: pageRuntime,
+    key: UPTIME_REQUEST_KEY,
+    loading: isLoading,
+    error: errorMessage,
+    errorMessage: '监控数据获取失败',
+  })
   const updatedAt = computed(() => status.value?.updated_at ?? '')
 
   const services = computed<ServiceView[]>(() => {
@@ -91,65 +100,45 @@ export function useUptimeStatus() {
 
   const refreshStatus = async () => {
     if (isLoading.value) return
-    isLoading.value = true
-    errorMessage.value = ''
-
-    try {
-      status.value = await monitorApi.uptime()
-    } catch (error) {
-      const message = (error as Error).message || '监控数据获取失败'
-      errorMessage.value = ''
-      toast.error(message)
-    } finally {
-      isLoading.value = false
-    }
+    await uptimeQuery.run(
+      () => monitorApi.uptime(),
+      {
+        apply: (response) => {
+          status.value = response
+        },
+        onError: (message) => {
+          errorMessage.value = ''
+          toast.error(message)
+        },
+      },
+    )
   }
 
-  const clearAutoRefreshTimer = () => {
-    if (autoRefreshTimer === null) return
-    window.clearTimeout(autoRefreshTimer)
-    autoRefreshTimer = null
-  }
+  const uptimePolling = useSerialVisibilityPolling({
+    runtime: pageRuntime,
+    key: UPTIME_REFRESH_TIMER_KEY,
+    intervalMs: AUTO_REFRESH_INTERVAL_MS,
+    action: refreshStatus,
+  })
 
-  const scheduleAutoRefresh = () => {
-    clearAutoRefreshTimer()
-    if (!isPageActive.value || document.hidden) return
-    autoRefreshTimer = window.setTimeout(async () => {
-      await refreshStatus()
-      scheduleAutoRefresh()
-    }, AUTO_REFRESH_INTERVAL_MS)
-  }
-
-  const handleVisibilityChange = () => {
-    if (document.hidden) {
-      clearAutoRefreshTimer()
-      return
-    }
-    scheduleAutoRefresh()
-  }
-
-  onMounted(() => {
-    isPageActive.value = true
+  pageRuntime.onActivate(() => {
     void refreshStatus()
-    scheduleAutoRefresh()
-    document.addEventListener('visibilitychange', handleVisibilityChange)
+    uptimePolling.start()
   })
 
-  onActivated(() => {
-    isPageActive.value = true
+  pageRuntime.onShow(() => {
     void refreshStatus()
-    scheduleAutoRefresh()
+    uptimePolling.start()
   })
 
-  onDeactivated(() => {
-    isPageActive.value = false
-    clearAutoRefreshTimer()
+  pageRuntime.onDeactivate(() => {
+    uptimeQuery.invalidate()
+    uptimePolling.stop()
   })
 
-  onBeforeUnmount(() => {
-    isPageActive.value = false
-    clearAutoRefreshTimer()
-    document.removeEventListener('visibilitychange', handleVisibilityChange)
+  pageRuntime.onHide(() => {
+    uptimeQuery.invalidate()
+    uptimePolling.stop()
   })
 
   return {

@@ -1,5 +1,7 @@
-import type { Account, AccountLane } from '@/api/accounts'
-import { proxyReferenceLabel } from '@/api/proxy'
+import type { Account, AccountGroup, AccountLane } from '@/api/accounts'
+import type { ProxyGroup } from '@/api/proxy'
+import { parseProxyReference, proxyReferenceLabel } from '@/api/proxy'
+import { PILL_TONE_CLASS } from '@/lib/pillTones'
 
 export type QuotaKey = 'fast' | 'thinking' | 'pro' | 'image' | 'music' | 'video'
 export type AccountStatusFilter = 'all' | 'normal' | 'limited' | 'abnormal' | 'disabled'
@@ -40,13 +42,17 @@ export const quotaOrder: QuotaKey[] = ['fast', 'thinking', 'pro', 'image', 'musi
 
 const laneOrder: AccountLane[] = ['fast', 'thinking', 'pro']
 
-const PILL_TONE_CLASS = {
-  success: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-500',
-  warning: 'border-amber-500/40 bg-amber-500/10 text-amber-500',
-  danger: 'border-rose-500/40 bg-rose-500/10 text-rose-500',
-  info: 'border-cyan-500/40 bg-cyan-500/10 text-cyan-500',
-  neutral: 'border-muted bg-muted/20 text-muted-foreground',
-} as const
+export type AccountGroupRow = AccountGroup & {
+  raw: AccountGroup
+  account_count: number
+  proxy_label: string
+}
+
+export type AccountProgressMetricItem = {
+  key: string
+  label: string
+  value: string | number
+}
 
 const IMAGE_UNAVAILABLE_HINTS = [
   '不能创建图片',
@@ -63,8 +69,62 @@ const IMAGE_UNAVAILABLE_HINTS = [
   'generate more images today',
 ]
 
+const ACCOUNT_STATUS_CATEGORY_VALUES = ['normal', 'limited', 'abnormal', 'disabled'] as const
+const ACCOUNT_STATUS_LABELS: Record<Exclude<AccountStatusFilter, 'all'>, string> = {
+  normal: '正常',
+  limited: '限流',
+  abnormal: '异常',
+  disabled: '禁用',
+}
+
 function cleanString(value: unknown): string {
   return String(value || '').trim()
+}
+
+function accountStatusCategoryValue(item: Account): Exclude<AccountStatusFilter, 'all'> | '' {
+  const raw = cleanString(item.status_category)
+  return ACCOUNT_STATUS_CATEGORY_VALUES.includes(raw as Exclude<AccountStatusFilter, 'all'>)
+    ? raw as Exclude<AccountStatusFilter, 'all'>
+    : ''
+}
+
+function signatureValue(value: unknown): string {
+  return cleanString(value).replaceAll('|', '/')
+}
+
+export function boundedSignatureText(value: unknown, limit = 160): string {
+  const text = signatureValue(value)
+  if (text.length <= limit) return text
+  return `${text.length}:${text.slice(0, limit)}:${text.slice(-24)}`
+}
+
+export function accountRowSignature(item: Account): string {
+  return [
+    item.id,
+    rowClass(item),
+    accountTokenPreview(item),
+    accountSourceText(item),
+    statusText(item),
+    statusClass(item),
+    boundedSignatureText(statusRawError(item)),
+    accountPrimaryText(item),
+    accountSecondaryText(item),
+    accountCreatedText(item),
+    accountRestoreText(item),
+    accountQuotaText(item),
+    boundedSignatureText(item.access_token, 48),
+    boundedSignatureText(item.cookie, 48),
+    item.type,
+    item.source_type,
+    item.group_id,
+    item.proxy,
+    item.backend_status,
+    item.image_quota_unknown ? 1 : 0,
+    item.success_count || 0,
+    item.failure_count || 0,
+    item.enabled ? 1 : 0,
+    item.is_demo ? 1 : 0,
+  ].map(signatureValue).join('|')
 }
 
 function includesHint(input: unknown, hints: string[]): boolean {
@@ -299,8 +359,8 @@ function laneBackoffDetailLines(item: Account): string[] {
     const untilLocal = String(entry.until_local || '').trim()
     const reason = String(entry.reason || '').trim()
     const base = lane
-      ? `${lane}：临时避让 ${formatDuration(waitSeconds)}`
-      : `临时避让 ${formatDuration(waitSeconds)}`
+      ? `${lane}：限流 ${formatDuration(waitSeconds)}`
+      : `限流 ${formatDuration(waitSeconds)}`
     const withUntil = untilLocal ? `${base}（到 ${untilLocal}）` : base
     return reason ? `${withUntil}；原因：${reason}` : withUntil
   })
@@ -320,16 +380,20 @@ export function quotaIssueDetailLines(item: Account): string[] {
 }
 
 export function statusText(item: Account): string {
+  const category = accountStatusCategoryValue(item)
+  if (category) return ACCOUNT_STATUS_LABELS[category]
+
+  const backendStatus = String(item.backend_status || '').trim()
+  const status = String(item.status || '').trim().toLowerCase()
   const reasonCode = String(item.status_reason_code || '').toLowerCase()
   const errorKind = String(item.last_error_kind || '').toLowerCase()
-  const laneBackoffLanes = Array.isArray(item.lane_backoff_summary?.lanes)
-    ? item.lane_backoff_summary.lanes.filter(Boolean)
-    : []
 
-  if (!item.enabled || item.status === 'disabled') return '已禁用'
-  if (item.status === 'incomplete') return '不完整'
+  if (!item.enabled || status === 'disabled' || backendStatus === '禁用') return '禁用'
   if (
-    item.status === 'invalid' ||
+    backendStatus === '异常' ||
+    status === 'abnormal' ||
+    status === 'invalid' ||
+    status === 'incomplete' ||
     reasonCode === 'snlm0e_refresh_failed' ||
     reasonCode === 'account_invalid' ||
     reasonCode === 'parse_failure' ||
@@ -338,12 +402,13 @@ export function statusText(item: Account): string {
     errorKind === 'parse_failure' ||
     errorKind === 'upstream_error'
   ) return '异常'
-  if (reasonCode === 'lane_backoff' || laneBackoffLanes.length > 0) {
-    if (laneBackoffLanes.length === 1) return `${laneBackoffLanes[0]} 避让`
-    if (laneBackoffLanes.length > 1) return '多路避让'
-    return '临时避让'
-  }
   if (
+    backendStatus === '限流' ||
+    status === 'limited' ||
+    status === 'rate_limited' ||
+    status === 'cooling' ||
+    status === 'backoff' ||
+    reasonCode === 'lane_backoff' ||
     reasonCode === 'pro_cooldown' ||
     reasonCode === 'video_cooldown' ||
     reasonCode === 'image_generation_unavailable' ||
@@ -356,24 +421,27 @@ export function statusText(item: Account): string {
     errorKind === 'media_degraded' ||
     errorKind === 'lane_degraded' ||
     errorKind === 'text_pending'
-  ) return '受限'
+  ) return '限流'
   return '正常'
 }
 
 export function statusCategory(item: Account): Exclude<AccountStatusFilter, 'all'> {
+  const category = accountStatusCategoryValue(item)
+  if (category) return category
+
   const text = statusText(item)
-  if (text === '已禁用') return 'disabled'
+  if (text === '禁用') return 'disabled'
   if (text === '正常') return 'normal'
-  if (text === '受限' || text.includes('避让')) return 'limited'
+  if (text === '限流') return 'limited'
   return 'abnormal'
 }
 
 export function statusClass(item: Account): string {
-  const text = statusText(item)
-  if (text === '正常') return PILL_TONE_CLASS.success
-  if (text === '受限' || text.includes('避让')) return PILL_TONE_CLASS.warning
-  if (text === '异常') return PILL_TONE_CLASS.danger
-  if (text === '不完整') return PILL_TONE_CLASS.info
+  const category = statusCategory(item)
+  if (category === 'normal') return PILL_TONE_CLASS.success
+  if (category === 'limited') return PILL_TONE_CLASS.warning
+  if (category === 'abnormal') return PILL_TONE_CLASS.danger
+  if (category === 'disabled') return PILL_TONE_CLASS.neutral
   return PILL_TONE_CLASS.neutral
 }
 
@@ -390,7 +458,7 @@ export function statusReason(item: Account): string {
 
   const lastError = String(item.last_error || '').trim()
   if (lastError) return lastError
-  if (!item.enabled || item.status === 'disabled') return '账号已禁用'
+  if (!item.enabled || item.status === 'disabled') return '账号禁用'
   if (item.status === 'incomplete') return '配置不完整，请检查 access token、账号类型或代理'
   if (item.status === 'invalid') return '账号鉴权异常'
   return '账号正常可用'
@@ -531,4 +599,80 @@ export function accountCreatedText(item: Account): string {
 
 export function accountRestoreText(item: Account): string {
   return formatAccountDate(item.restore_at)
+}
+
+export function accountStatusDetailText(
+  item: Account,
+  groupLabel: (groupId: string | undefined) => string,
+  proxyText: (account: Account) => string = accountProxyText,
+): string {
+  return [
+    statusReason(item),
+    `账号组：${groupLabel(item.group_id)}`,
+    `代理：${proxyText(item)}`,
+  ].filter(Boolean).join('\n')
+}
+
+export function accountDetailItems(item: Account) {
+  return [
+    { label: '创建时间', value: accountCreatedText(item) },
+    { label: '恢复时间', value: accountRestoreText(item) },
+    { label: '图片额度', value: accountQuotaText(item) },
+    { label: '成功 / 失败', value: `${item.success_count || 0} / ${item.failure_count || 0}` },
+  ]
+}
+
+export function accountGroupNameMap(groups: readonly AccountGroup[]): Map<string, string> {
+  return new Map(groups.map((group) => [group.id, group.name || group.id]))
+}
+
+export function accountGroupLabel(groupId: string | undefined, groupNames: ReadonlyMap<string, string>): string {
+  const id = cleanString(groupId)
+  if (!id) return '未分组'
+  return groupNames.get(id) || id
+}
+
+export function accountGroupProxyLabel(group: AccountGroup, proxyGroups: readonly ProxyGroup[]): string {
+  const legacyProxyGroupId = cleanString(group.proxy_group_id)
+  const proxyReference = parseProxyReference(group.proxy || (legacyProxyGroupId ? `group:${legacyProxyGroupId}` : ''))
+  const proxyGroup = proxyReference.mode === 'group'
+    ? proxyGroups.find((item) => item.id === proxyReference.value)
+    : null
+  if (proxyReference.mode === 'global') return '使用默认出口'
+  if (proxyReference.mode === 'direct') return '强制直连'
+  if (proxyReference.mode === 'group') return `代理组：${proxyGroup?.name || proxyReference.value || '-'}`
+  if (proxyReference.mode === 'profile') return `历史代理：${proxyReference.value || '-'}`
+  return `自定义代理：${proxyReference.value || '-'}`
+}
+
+export function buildAccountGroupRows(
+  groups: readonly AccountGroup[],
+  proxyGroups: readonly ProxyGroup[],
+): AccountGroupRow[] {
+  return groups.map((group) => ({
+    ...group,
+    raw: group,
+    name: group.name || group.id,
+    account_count: Number(group.account_count || 0),
+    proxy_label: accountGroupProxyLabel(group, proxyGroups),
+  }))
+}
+
+export function buildAccountProgressMetricItems(
+  metricLabel: string,
+  metricValue: string | number,
+  statusTextValue: string,
+): AccountProgressMetricItem[] {
+  return [
+    {
+      key: 'metric',
+      label: metricLabel,
+      value: metricValue,
+    },
+    {
+      key: 'status',
+      label: '状态',
+      value: statusTextValue,
+    },
+  ]
 }

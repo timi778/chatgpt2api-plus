@@ -1,13 +1,15 @@
 <template>
   <div ref="rootRef" class="floating-action-menu" :style="rootStyle">
     <Button
+      v-if="triggerVariant === 'button'"
       variant="outline"
       :size="size === 'xs' ? 'xs' : 'sm'"
       :disabled="disabled"
       :root-class="triggerRootClass"
+      :aria-expanded="open"
       @click.stop="toggleMenu"
     >
-      <span>{{ label }}</span>
+      <span class="truncate">{{ label }}</span>
       <svg
         viewBox="0 0 20 20"
         class="h-3.5 w-3.5 transition-transform"
@@ -18,6 +20,26 @@
         <path d="M5 7l5 6 5-6H5z" />
       </svg>
     </Button>
+    <button
+      v-else
+      type="button"
+      class="ui-input-sm ui-select-trigger floating-action-menu-input-trigger"
+      :class="inputTriggerClass"
+      :disabled="disabled"
+      :aria-expanded="open"
+      @click.stop="toggleMenu"
+    >
+      <span>{{ label }}</span>
+      <svg
+        viewBox="0 0 20 20"
+        class="h-4 w-4 transition-transform"
+        :class="open ? 'rotate-180' : ''"
+        fill="currentColor"
+        aria-hidden="true"
+      >
+        <path d="M5 7l5 6 5-6H5z" />
+      </svg>
+    </button>
 
     <Teleport to="body">
       <div
@@ -35,8 +57,14 @@
             role="separator"
             aria-hidden="true"
           />
+          <div
+            v-if="item.heading"
+            class="floating-action-menu-heading"
+          >
+            {{ item.label }}
+          </div>
           <button
-            v-if="item.children?.length"
+            v-else-if="item.children?.length"
             type="button"
             class="floating-action-menu-item floating-action-menu-item-parent ui-menu-item"
             :class="[
@@ -67,13 +95,29 @@
             v-else
             type="button"
             class="floating-action-menu-item ui-menu-item"
-            :class="item.danger ? 'floating-action-menu-item-danger ui-menu-item-danger' : ''"
+            :class="[
+              item.danger ? 'floating-action-menu-item-danger ui-menu-item-danger' : '',
+              item.active ? 'floating-action-menu-item-active' : '',
+            ]"
             :disabled="item.disabled"
             @mouseenter="closeSubmenu"
             @focusin="closeSubmenu"
             @click="selectItem(item)"
           >
-            {{ item.label }}
+            <span class="floating-action-menu-label">{{ item.label }}</span>
+            <svg
+              v-if="item.active"
+              aria-hidden="true"
+              viewBox="0 0 20 20"
+              class="floating-action-menu-check h-3.5 w-3.5"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.8"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <path d="M5 10.5l3 3 7-7" />
+            </svg>
           </button>
         </template>
       </div>
@@ -93,14 +137,37 @@
             role="separator"
             aria-hidden="true"
           />
+          <div
+            v-if="child.heading"
+            class="floating-action-menu-heading"
+          >
+            {{ child.label }}
+          </div>
           <button
+            v-else
             type="button"
             class="floating-action-menu-item floating-action-menu-item-child ui-menu-item"
-            :class="child.danger ? 'floating-action-menu-item-danger ui-menu-item-danger' : ''"
+            :class="[
+              child.danger ? 'floating-action-menu-item-danger ui-menu-item-danger' : '',
+              child.active ? 'floating-action-menu-item-active' : '',
+            ]"
             :disabled="child.disabled"
             @click="selectItem(child)"
           >
-            {{ child.label }}
+            <span class="floating-action-menu-label">{{ child.label }}</span>
+            <svg
+              v-if="child.active"
+              aria-hidden="true"
+              viewBox="0 0 20 20"
+              class="floating-action-menu-check h-3.5 w-3.5"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.8"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <path d="M5 10.5l3 3 7-7" />
+            </svg>
           </button>
         </template>
       </div>
@@ -111,13 +178,17 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { Button } from 'nanocat-ui'
+import { useExclusiveFloatingMenu } from '@/composables/useExclusiveFloatingMenu'
 import type { ActionMenuItem, UiSize } from 'nanocat-ui'
 import type { CSSProperties } from 'vue'
 
 type FloatingActionMenuItem = ActionMenuItem & {
+  active?: boolean
+  heading?: boolean
   children?: FloatingActionMenuItem[]
 }
 type FloatingMenuPlacement = 'auto' | 'top' | 'bottom' | 'left' | 'right'
+type FloatingMenuTriggerVariant = 'button' | 'input'
 
 const props = withDefaults(defineProps<{
   label: string
@@ -126,6 +197,7 @@ const props = withDefaults(defineProps<{
   align?: 'left' | 'right'
   placement?: FloatingMenuPlacement
   size?: UiSize
+  triggerVariant?: FloatingMenuTriggerVariant
   triggerClass?: string
   menuClass?: string
   menuMinWidth?: number
@@ -136,6 +208,7 @@ const props = withDefaults(defineProps<{
   align: 'right',
   placement: 'auto',
   size: 'sm',
+  triggerVariant: 'button',
   triggerClass: '',
   menuClass: 'min-w-max',
 })
@@ -151,11 +224,18 @@ const open = ref(false)
 const activeParentKey = ref('')
 const menuPosition = ref({ left: 0, top: 0, minWidth: 0, maxHeight: 0 })
 const submenuPosition = ref({ left: 0, top: 0, minWidth: 0, maxHeight: 0 })
-const menuId = `floating-menu-${Math.random().toString(36).slice(2)}`
+const { announceOpen } = useExclusiveFloatingMenu(closeMenu, 'floating-menu')
 let activeParentElement: HTMLElement | null = null
 const hasTriggerSizing = computed(() => Boolean(props.triggerWidth || props.triggerMinWidth))
 const triggerRootClass = computed(() => [
   'floating-action-menu-trigger justify-between gap-2',
+  open.value ? 'floating-action-menu-trigger-active' : '',
+  hasTriggerSizing.value ? 'w-full' : '',
+  props.triggerClass,
+].filter(Boolean).join(' '))
+const inputTriggerClass = computed(() => [
+  'floating-action-menu-trigger',
+  open.value ? 'floating-action-menu-trigger-active' : '',
   hasTriggerSizing.value ? 'w-full' : '',
   props.triggerClass,
 ].filter(Boolean).join(' '))
@@ -203,7 +283,7 @@ async function toggleMenu() {
   if (props.disabled) return
   open.value = !open.value
   if (open.value) {
-    window.dispatchEvent(new CustomEvent('ai-floating-menu-open', { detail: menuId }))
+    announceOpen()
     await nextTick()
     updatePosition()
     requestAnimationFrame(updatePosition)
@@ -350,16 +430,10 @@ function handleKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape') closeMenu()
 }
 
-function handleOtherMenuOpen(event: Event) {
-  if ((event as CustomEvent<string>).detail === menuId) return
-  closeMenu()
-}
-
 onMounted(() => {
   document.addEventListener('click', handleDocumentClick)
   window.addEventListener('resize', updatePosition)
   window.addEventListener('scroll', updatePosition, true)
-  window.addEventListener('ai-floating-menu-open', handleOtherMenuOpen)
   document.addEventListener('keydown', handleKeydown)
 })
 
@@ -367,7 +441,6 @@ onBeforeUnmount(() => {
   document.removeEventListener('click', handleDocumentClick)
   window.removeEventListener('resize', updatePosition)
   window.removeEventListener('scroll', updatePosition, true)
-  window.removeEventListener('ai-floating-menu-open', handleOtherMenuOpen)
   document.removeEventListener('keydown', handleKeydown)
 })
 </script>
@@ -378,23 +451,53 @@ onBeforeUnmount(() => {
   display: inline-flex;
 }
 
+.floating-action-menu-input-trigger {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
 .floating-action-menu-panel {
-  padding: 6px !important;
-  border-radius: 14px !important;
+  padding: 6px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 14px;
+  background: hsl(var(--card));
+  box-shadow: var(--shadow-floating);
   overflow-y: auto;
   overscroll-behavior: contain;
 }
 
 .floating-action-menu-item {
   width: 100%;
-  justify-content: flex-start !important;
+  justify-content: flex-start;
   white-space: nowrap;
   text-align: left;
-  border-radius: 10px;
+  border-radius: 999px;
+}
+
+.floating-action-menu-heading {
+  display: flex;
+  min-height: 1.35rem;
+  align-items: center;
+  padding: 0 0.55rem;
+  color: hsl(var(--muted-foreground) / 0.7);
+  font-size: 0.72rem;
+  font-weight: 500;
+  line-height: 1;
+}
+
+.floating-action-menu-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.floating-action-menu-check {
+  margin-left: 1rem;
+  flex: 0 0 auto;
 }
 
 .floating-action-menu-item-parent {
-  justify-content: space-between !important;
+  justify-content: space-between;
   gap: 12px;
 }
 

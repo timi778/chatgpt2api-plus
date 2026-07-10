@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import atexit
+import copy
 import re
 import threading
 from datetime import datetime, timedelta
@@ -13,6 +15,7 @@ from utils.timezone import beijing_now, parse_to_beijing_naive
 
 DASHBOARD_METRICS_FILE = DATA_DIR / "dashboard_metrics.json"
 DASHBOARD_METRICS_RETENTION_DAYS = 30
+DASHBOARD_METRICS_FLUSH_DELAY_SECONDS = 2.0
 
 _NON_MODEL_KEYS = {
     "",
@@ -119,13 +122,18 @@ class DashboardMetricsService:
     def __init__(self, path=DASHBOARD_METRICS_FILE):
         self.path = path
         self._lock = threading.RLock()
+        self._data: dict[str, Any] | None = None
+        self._dirty = False
+        self._flush_timer: threading.Timer | None = None
 
     def _load(self) -> dict[str, Any]:
-        data = read_json_object(self.path, name="dashboard_metrics.json")
-        if not isinstance(data.get("days"), dict):
-            data["days"] = {}
-        data["version"] = 1
-        return data
+        if self._data is None:
+            data = read_json_object(self.path, name="dashboard_metrics.json")
+            if not isinstance(data.get("days"), dict):
+                data["days"] = {}
+            data["version"] = 1
+            self._data = data
+        return self._data
 
     def _save(self, data: dict[str, Any]) -> None:
         data["version"] = 1
@@ -134,18 +142,58 @@ class DashboardMetricsService:
         write_json_file(self.path, data)
 
     @staticmethod
-    def _prune(data: dict[str, Any], now: datetime | None = None) -> None:
+    def _prune(data: dict[str, Any], now: datetime | None = None) -> bool:
         current = (now or _beijing_now_naive()).date()
         cutoff = current - timedelta(days=DASHBOARD_METRICS_RETENTION_DAYS - 1)
         days = data.get("days") if isinstance(data.get("days"), dict) else {}
+        changed = False
         for day in list(days.keys()):
             try:
                 parsed = datetime.strptime(str(day), "%Y-%m-%d").date()
             except ValueError:
                 days.pop(day, None)
+                changed = True
                 continue
             if parsed < cutoff or parsed > current:
                 days.pop(day, None)
+                changed = True
+        return changed
+
+    def _schedule_flush_locked(self) -> None:
+        if self._flush_timer is not None and self._flush_timer.is_alive():
+            return
+        timer = threading.Timer(DASHBOARD_METRICS_FLUSH_DELAY_SECONDS, self._flush_due)
+        timer.daemon = True
+        self._flush_timer = timer
+        timer.start()
+
+    def _mark_dirty_locked(self) -> None:
+        self._dirty = True
+        self._schedule_flush_locked()
+
+    def _flush_due(self) -> None:
+        try:
+            self.flush()
+        except Exception as exc:
+            logger.error({"event": "dashboard_metrics_flush_failed", "error": str(exc)})
+
+    def flush(self) -> None:
+        with self._lock:
+            timer = self._flush_timer
+            self._flush_timer = None
+            if timer is not None and timer is not threading.current_thread():
+                timer.cancel()
+            if self._data is None or not self._dirty:
+                return
+            self._prune(self._data)
+            try:
+                self._save(self._data)
+            except Exception:
+                self._dirty = True
+                self._schedule_flush_locked()
+                raise
+            else:
+                self._dirty = False
 
     @staticmethod
     def _apply_call(bucket: dict[str, Any], item: dict[str, Any]) -> None:
@@ -196,7 +244,7 @@ class DashboardMetricsService:
             hour = hours.setdefault(hour_key, _empty_bucket())
             self._apply_call(day, item)
             self._apply_call(hour, item)
-            self._save(data)
+            self._mark_dirty_locked()
 
     def backfill_if_empty(self, items: list[dict[str, Any]]) -> None:
         with self._lock:
@@ -220,7 +268,7 @@ class DashboardMetricsService:
                 self._apply_call(day, item)
                 self._apply_call(hour, item)
             self._prune(data)
-            self._save(data)
+            self._mark_dirty_locked()
 
     def summary(self, time_range: str = "24h") -> dict[str, Any]:
         bucket_count = {"24h": 24, "7d": 7, "30d": 30}.get(time_range, 24)
@@ -237,8 +285,10 @@ class DashboardMetricsService:
 
         with self._lock:
             data = self._load()
-            self._prune(data)
-            days = data.get("days") if isinstance(data.get("days"), dict) else {}
+            if self._prune(data):
+                self._mark_dirty_locked()
+            raw_days = data.get("days") if isinstance(data.get("days"), dict) else {}
+            days = copy.deepcopy(raw_days)
 
         total_bucket = _empty_bucket()
         series_buckets: list[dict[str, Any]] = []
@@ -305,6 +355,7 @@ class DashboardMetricsService:
 
 
 dashboard_metrics_service = DashboardMetricsService()
+atexit.register(dashboard_metrics_service.flush)
 
 
 def safe_record_dashboard_call(item: dict[str, Any]) -> None:

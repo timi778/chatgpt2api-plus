@@ -7,15 +7,22 @@
     <button
       ref="trigger"
       type="button"
-      class="ui-input-sm grouped-select-trigger"
+      class="ui-input-sm ui-select-trigger grouped-select-trigger"
       :class="block ? 'grouped-select-trigger--block' : ''"
       :title="currentLabel"
       :aria-label="ariaLabel || currentLabel"
+      :aria-expanded="open"
       :disabled="disabled"
       @click="toggle"
     >
       <span class="truncate">{{ currentLabel }}</span>
-      <svg aria-hidden="true" viewBox="0 0 20 20" class="h-4 w-4" fill="currentColor">
+      <svg
+        aria-hidden="true"
+        viewBox="0 0 20 20"
+        class="h-4 w-4 transition-transform"
+        :class="open ? 'rotate-180' : ''"
+        fill="currentColor"
+      >
         <path d="M5 7l5 6 5-6H5z" />
       </svg>
     </button>
@@ -72,6 +79,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { useExclusiveFloatingMenu } from '@/composables/useExclusiveFloatingMenu'
 
 type GroupedSelectOption = {
   label: string
@@ -123,6 +131,7 @@ const root = ref<HTMLElement | null>(null)
 const trigger = ref<HTMLButtonElement | null>(null)
 const menu = ref<HTMLElement | null>(null)
 const menuPosition = ref({ top: 0, left: 0, width: 0, maxHeight: 0 })
+const { announceOpen } = useExclusiveFloatingMenu(closeMenu, 'grouped-select')
 
 const resolvedGroups = computed<GroupedSelectGroup[]>(() => {
   if (props.groups?.length) return props.groups
@@ -237,6 +246,7 @@ function resolvePlacement(
 
 async function openMenu() {
   open.value = true
+  announceOpen()
   await nextTick()
   updateMenuPosition()
   requestAnimationFrame(updateMenuPosition)
@@ -310,21 +320,11 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .grouped-select-trigger {
-  display: flex;
   width: auto;
-  min-width: 0;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  color: hsl(var(--foreground));
 }
 
 .grouped-select-trigger--block {
   width: 100%;
-}
-
-.grouped-select-trigger:hover {
-  border-color: hsl(var(--primary));
 }
 
 .grouped-select-menu {

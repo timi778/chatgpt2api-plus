@@ -2,9 +2,7 @@
   <Teleport to="body">
     <div v-if="file" class="lightbox" @click.self="$emit('close')">
       <div class="lightbox-content">
-        <button class="lightbox-close" @click="$emit('close')">
-          <Icon icon="lucide:x" />
-        </button>
+        <ModalCloseButton class="lightbox-close" label="关闭预览" tone="dark" @click="$emit('close')" />
         <img
           :src="imageUrl"
           :alt="file.filename"
@@ -36,6 +34,7 @@
 import { computed } from 'vue'
 import { Icon } from '@iconify/vue'
 import type { GalleryFile } from '@/api/gallery'
+import ModalCloseButton from './ModalCloseButton.vue'
 
 const props = withDefaults(defineProps<{
   file: GalleryFile | null
@@ -74,7 +73,7 @@ function emitFile(event: 'download' | 'copy' | 'edit-tags') {
 .lightbox {
   position: fixed;
   inset: 0;
-  z-index: 140;
+  z-index: 420;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -96,21 +95,6 @@ function emitFile(event: 'download' | 'copy' | 'edit-tags') {
   position: absolute;
   top: -40px;
   right: -4px;
-  display: flex;
-  width: 34px;
-  height: 34px;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.14);
-  color: white;
-  cursor: pointer;
-  transition: background 0.15s;
-}
-
-.lightbox-close:hover {
-  background: rgba(255, 255, 255, 0.28);
 }
 
 .lightbox-media {

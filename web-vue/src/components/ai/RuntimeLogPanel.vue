@@ -16,15 +16,16 @@
     </div>
 
     <div v-else class="runtime-log-panel__body scrollbar-slim">
-      <pre v-if="rawText.trim()" class="runtime-log-panel__raw">{{ rawText }}</pre>
+      <pre v-if="hasRawText" class="runtime-log-panel__raw">{{ rawText }}</pre>
       <div v-else class="runtime-log-panel__lines">
         <div
-          v-for="(line, index) in lines"
-          :key="line.key || `${line.time || 'log'}-${index}`"
+          v-for="line in lineViews"
+          :key="line.key"
+          v-memo="[line.signature]"
           class="runtime-log-panel__line"
           :class="[
-            `runtime-log-panel__line--${line.level || 'info'}`,
-            { 'runtime-log-panel__line--plain': !line.time },
+            line.levelClass,
+            { 'runtime-log-panel__line--plain': line.plain },
           ]"
         >
           <span v-if="line.time" class="runtime-log-panel__time">{{ line.time }}</span>
@@ -66,12 +67,54 @@ const props = withDefaults(defineProps<{
   fill: false,
 })
 
-const isEmpty = computed(() => !props.rawText.trim() && props.lines.length === 0)
+type RuntimeLogPanelLineView = RuntimeLogPanelLine & {
+  key: string
+  signature: string
+  levelClass: string
+  plain: boolean
+}
+
+const hasRawText = computed(() => props.rawText.trim().length > 0)
+const isEmpty = computed(() => !hasRawText.value && props.lines.length === 0)
+const lineViews = computed<RuntimeLogPanelLineView[]>(() => props.lines.map((line, index) => {
+  const level = line.level || 'info'
+  const time = line.time || ''
+  const text = line.text || '-'
+  return {
+    ...line,
+    key: line.key || `${time || 'log'}-${index}`,
+    time,
+    text,
+    level,
+    levelClass: `runtime-log-panel__line--${level}`,
+    plain: !time,
+    signature: runtimeLogPanelLineSignature({ ...line, time, text, level }, index),
+  }
+}))
 
 const panelStyle = computed(() => ({
   '--runtime-log-min-height': props.minHeight,
   '--runtime-log-max-height': props.maxHeight,
 }))
+
+function runtimeLogPanelLineSignature(line: RuntimeLogPanelLine, index: number): string {
+  return [
+    line.key || index,
+    line.time || '',
+    line.level || 'info',
+    boundedSignatureText(line.text || '-'),
+  ].map(signatureValue).join('|')
+}
+
+function signatureValue(value: unknown): string {
+  return String(value ?? '').replaceAll('|', '/')
+}
+
+function boundedSignatureText(value: unknown, limit = 180): string {
+  const text = signatureValue(value)
+  if (text.length <= limit) return text
+  return `${text.length}:${text.slice(0, limit)}:${text.slice(-24)}`
+}
 </script>
 
 <style scoped>

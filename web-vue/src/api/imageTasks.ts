@@ -8,6 +8,8 @@ export interface ImageTaskAsset {
   path?: string
   b64_json?: string
   revised_prompt?: string
+  width?: number
+  height?: number
   [key: string]: unknown
 }
 
@@ -81,6 +83,7 @@ export interface CreateGenerationTaskInput {
 export interface CreateEditTaskInput extends CreateGenerationTaskInput {
   files?: File[]
   imageUrls?: string[]
+  mask?: File
 }
 
 export const DEFAULT_IMAGE_MODEL = 'gpt-image-2'
@@ -216,6 +219,11 @@ export function normalizeImageCount(value: unknown) {
   return Math.min(4, Math.max(1, count))
 }
 
+function positiveImageDimension(value: unknown) {
+  const dimension = Number(value)
+  return Number.isFinite(dimension) && dimension > 0 ? Math.trunc(dimension) : undefined
+}
+
 export function createClientTaskId(prefix = 'img') {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
     return `${prefix}-${crypto.randomUUID()}`
@@ -239,7 +247,7 @@ function normalizeTask(raw: Partial<ImageTask>): ImageTask {
     elapsed_secs: Number.isFinite(Number(raw.elapsed_secs)) ? Number(raw.elapsed_secs) : undefined,
     duration_ms: Number.isFinite(Number(raw.duration_ms)) ? Number(raw.duration_ms) : undefined,
     conversation_id: cleanString(raw.conversation_id),
-    data: Array.isArray(raw.data) ? raw.data : [],
+    data: Array.isArray(raw.data) ? raw.data.map((asset) => normalizeTaskAsset(asset)) : [],
     usage: raw.usage && typeof raw.usage === 'object' ? raw.usage : undefined,
     error: cleanString(raw.error),
     error_code: cleanString(raw.error_code),
@@ -267,6 +275,19 @@ function normalizeTask(raw: Partial<ImageTask>): ImageTask {
     poll_timeout_secs: Number.isFinite(Number(raw.poll_timeout_secs)) ? Number(raw.poll_timeout_secs) : undefined,
     stream_timeout_secs: Number.isFinite(Number(raw.stream_timeout_secs)) ? Number(raw.stream_timeout_secs) : undefined,
     last_task_error: cleanString(raw.last_task_error),
+  }
+}
+
+function normalizeTaskAsset(raw: unknown): ImageTaskAsset {
+  const asset = (raw && typeof raw === 'object' ? raw : {}) as ImageTaskAsset
+  return {
+    ...asset,
+    url: cleanString(asset.url),
+    path: cleanString(asset.path),
+    b64_json: cleanString(asset.b64_json),
+    revised_prompt: cleanString(asset.revised_prompt),
+    width: positiveImageDimension(asset.width),
+    height: positiveImageDimension(asset.height),
   }
 }
 
@@ -329,6 +350,9 @@ function createEditForm(input: CreateEditTaskInput) {
 
   for (const file of input.files || []) {
     form.append('image', file, file.name)
+  }
+  if (input.mask) {
+    form.append('mask', input.mask, input.mask.name || 'mask.png')
   }
   return form
 }

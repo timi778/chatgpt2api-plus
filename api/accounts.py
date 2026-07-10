@@ -271,10 +271,122 @@ def _upsert_account_group(body: AccountGroupRequest) -> dict[str, Any]:
     return {"group": item, **_account_group_payload(updated.get("account_groups", []))}
 
 
+def _truthy_value(value: object, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    raw = _clean_text(value).lower()
+    if raw in {"1", "true", "yes", "y", "on"}:
+        return True
+    if raw in {"0", "false", "no", "n", "off", "none", "null", ""}:
+        return False
+    return default
+
+
+def _int_value(value: object) -> int:
+    try:
+        return int(float(str(value or "0").strip()))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _account_status_category(account: dict[str, Any]) -> Literal["normal", "limited", "abnormal", "disabled"]:
+    status = _clean_text(account.get("status"))
+    status_key = status.lower()
+    reason_code = _clean_text(account.get("status_reason_code")).lower()
+    error_kind = _clean_text(account.get("last_error_kind")).lower()
+
+    if (
+        status in {"禁用"}
+        or status_key in {"disabled", "auto_disabled"}
+        or reason_code == "disabled"
+        or _truthy_value(account.get("auto_disabled"))
+        or (account.get("enabled") is not None and not _truthy_value(account.get("enabled"), True))
+    ):
+        return "disabled"
+
+    if status in {"限流"} or status_key in {"limited", "rate_limited", "cooling", "backoff"}:
+        return "limited"
+    if status in {"异常"} or status_key in {"abnormal", "invalid", "error", "incomplete"}:
+        return "abnormal"
+
+    limited_reason_codes = {
+        "pro_cooldown",
+        "video_cooldown",
+        "lane_backoff",
+        "lane_degraded",
+        "image_generation_unavailable",
+        "image_degraded_to_fast",
+        "image_quota_exhausted",
+        "text_pending",
+    }
+    limited_error_kinds = {
+        "quota_exhausted",
+        "media_pending",
+        "media_generation_unavailable",
+        "media_degraded",
+        "lane_degraded",
+        "text_pending",
+    }
+    if reason_code in limited_reason_codes or error_kind in limited_error_kinds:
+        return "limited"
+
+    abnormal_reason_codes = {
+        "snlm0e_refresh_failed",
+        "account_invalid",
+        "parse_failure",
+        "upstream_error",
+    }
+    abnormal_error_kinds = {"auth_invalid", "parse_failure", "upstream_error"}
+    if (
+        reason_code in abnormal_reason_codes
+        or error_kind in abnormal_error_kinds
+        or _int_value(account.get("invalid_count")) > 0
+        or _clean_text(account.get("last_refresh_error"))
+        or _clean_text(account.get("last_token_refresh_error"))
+    ):
+        return "abnormal"
+
+    lane_backoff_summary = account.get("lane_backoff_summary")
+    if isinstance(lane_backoff_summary, dict) and _truthy_value(lane_backoff_summary.get("active")):
+        return "limited"
+
+    return "normal"
+
+
+def _account_status_label(
+        category: Literal["normal", "limited", "abnormal", "disabled"],
+) -> str:
+    return {
+        "normal": "正常",
+        "limited": "限流",
+        "abnormal": "异常",
+        "disabled": "禁用",
+    }[category]
+
+
+def _account_status_payload(account: dict[str, Any]) -> dict[str, str]:
+    category = _account_status_category(account)
+    return {
+        "status_category": category,
+        "status_label": _account_status_label(category),
+    }
+
+
+def _account_for_api(account: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **account,
+        **_account_status_payload(account),
+    }
+
+
 def _status_matches_filter(account: dict[str, Any], status_filter: str) -> bool:
     status_filter = status_filter.strip().lower()
     if not status_filter or status_filter == "all":
         return True
+    if status_filter in {"normal", "limited", "abnormal", "disabled"}:
+        return _account_status_category(account) == status_filter
     status = _clean_text(account.get("status"))
     status_map = {
         "normal": "\u6b63\u5e38",
@@ -333,7 +445,7 @@ def _accounts_page(
     start = (safe_page - 1) * safe_page_size
     end = start + safe_page_size
     return {
-        "items": filtered[start:end],
+        "items": [_account_for_api(item) for item in filtered[start:end]],
         "total": len(filtered),
         "all_total": len(items),
         "page": safe_page,

@@ -6,185 +6,27 @@
         <p>输入文字可以直接对话；切到画图后，在同一个窗口里生成图片、上传参考图和继续编辑。</p>
       </div>
 
-      <div v-else class="studio-turns">
+      <div v-else ref="turnsEl" class="studio-turns">
         <div v-if="hiddenMessageCount > 0" class="studio-load-earlier-row">
           <button type="button" class="studio-load-earlier-button" @click="showOlderMessages">
             显示更早消息（{{ hiddenMessageCount }} 条）
           </button>
         </div>
 
-        <article
+        <StudioMessageItem
           v-for="message in messageViews"
           :key="message.id"
           v-memo="[message.memoKey]"
-          class="chat-message-row"
-          :class="message.role === 'user' ? 'is-user' : 'is-assistant'"
-        >
-          <div
-            class="chat-message-container"
-            :class="[
-              message.role === 'user' ? 'is-user' : 'is-assistant',
-              message.isImageMessage ? 'is-image-message' : '',
-              message.isPendingImageMessage ? 'is-pending-image-message' : '',
-            ]"
-          >
-            <div class="chat-message-header" :class="{ 'is-user': message.role === 'user' }">
-              <div
-                class="chat-message-avatar"
-                :class="{ 'chat-message-avatar-user': message.role === 'user' }"
-                aria-hidden="true"
-              >
-                <Icon :icon="message.role === 'user' ? 'lucide:user' : 'lucide:bot'" class="h-4 w-4" />
-              </div>
-
-              <div class="chat-message-actions">
-                <button
-                  v-for="action in messageActions(message)"
-                  :key="action.key"
-                  type="button"
-                  class="chat-input-action chat-message-action"
-                  :class="{ 'chat-message-action-danger': action.danger }"
-                  :title="action.label"
-                  :aria-label="action.label"
-                  @click="handleMessageAction(action.key, message)"
-                >
-                  <span class="icon"><Icon :icon="action.icon" class="h-3.5 w-3.5" /></span>
-                  <span class="text">{{ action.label }}</span>
-                </button>
-              </div>
-            </div>
-
-            <div class="chat-message-bubble-wrap">
-              <div
-                class="chat-message-bubble"
-                :class="[
-                  message.role === 'user' ? 'chat-message-bubble-user' : 'chat-message-bubble-assistant',
-                  message.isImageMessage ? 'chat-message-bubble-image' : '',
-                  message.isPendingImageMessage ? 'chat-message-bubble-image-pending' : '',
-                  message.status === 'error' ? 'chat-message-bubble-error' : '',
-                ]"
-                :style="message.imagePreviewStyle"
-              >
-                <div
-                  class="chat-message-content"
-                  :class="{
-                    'is-collapsible': message.isCollapsible,
-                    'is-collapsed': message.isCollapsed,
-                  }"
-                >
-                  <template v-if="message.role === 'user'">
-                    <p v-if="message.content" class="studio-user-prompt">{{ message.content }}</p>
-                    <div v-if="message.attachments?.length" class="studio-attachment-line">
-                      <Icon icon="lucide:paperclip" class="h-3.5 w-3.5" />
-                      {{ message.attachments.join('、') }}
-                    </div>
-                  </template>
-
-                  <template v-else-if="message.mode !== 'image'">
-                    <StudioMarkdownContent
-                      v-if="message.content || message.status === 'streaming'"
-                      :content="message.content || ' '"
-                      @citation-click="scrollToCitationSource"
-                    />
-                    <span v-if="message.status === 'streaming'" class="studio-cursor"></span>
-                    <p v-if="message.error && !message.content.includes(message.error)" class="studio-error-text">
-                      {{ message.error }}
-                    </p>
-                    <button
-                      v-if="message.mode === 'search' && message.searchSources?.length"
-                      type="button"
-                      class="studio-search-source-chip"
-                      @click="openSearchSourcePanel(message)"
-                    >
-                      <Icon icon="lucide:link" class="studio-search-source-chip-icon h-3.5 w-3.5" />
-                      <span class="studio-search-source-chip-label">参考来源</span>
-                      <strong>{{ message.searchSources.length }}</strong>
-                      <small>查看</small>
-                    </button>
-                    <div v-if="message.mode === 'search' && message.searchImageGroups?.length" class="studio-search-image-groups">
-                      <div
-                        v-for="(group, groupIndex) in message.searchImageGroups"
-                        :key="`${message.id}-image-group-${groupIndex}`"
-                        class="studio-search-image-group"
-                      >
-                        <span class="studio-search-image-group-title">
-                          <Icon icon="lucide:image" class="h-3.5 w-3.5" />
-                          图片参考<span v-if="group.aspectRatio"> {{ group.aspectRatio }}</span>
-                        </span>
-                        <span class="studio-search-image-group-queries">
-                          <span v-for="query in group.queries" :key="query" class="studio-search-image-query">{{ query }}</span>
-                        </span>
-                      </div>
-                    </div>
-                  </template>
-
-                  <template v-else>
-                    <template v-if="!message.task || message.task.status === 'queued' || message.task.status === 'running'">
-                      <div class="studio-result-block studio-result-block-pending">
-                        <div class="studio-result-grid" :class="{ 'is-single': message.imageSlotCount <= 1 }">
-                          <div
-                            v-for="slot in message.pendingSlots"
-                            :key="`${message.id}-pending-${slot}`"
-                            class="studio-result-item"
-                          >
-                            <div class="studio-result-media studio-result-placeholder">
-                              <Icon icon="lucide:loader-circle" class="h-5 w-5 animate-spin" />
-                              <span>正在处理图片</span>
-                              <small>{{ message.imagePendingStageText }}</small>
-                            </div>
-                            <div v-if="message.imageSlotCount > 1" class="studio-result-caption">
-                              <span>图片 {{ slot + 1 }}</span>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    </template>
-
-                    <template v-else>
-                      <div v-if="message.task?.status === 'error'" class="studio-image-status is-error">
-                        <Icon icon="lucide:circle-alert" class="h-4 w-4" />
-                        <span>{{ message.primaryMessage || '上游没有返回可用图片。' }}</span>
-                      </div>
-
-                      <div v-else class="studio-result-block">
-                        <div class="studio-result-grid" :class="{ 'is-single': message.assets.length <= 1 }">
-                          <div
-                            v-for="(asset, assetIndex) in message.assets"
-                            :key="`${message.id}-${assetIndex}`"
-                            class="studio-result-item"
-                          >
-                            <button
-                              type="button"
-                              class="studio-result-media"
-                              :class="{ 'has-image': Boolean(assetUrl(asset)) }"
-                              @click="emit('preview', assetUrl(asset), `结果 ${assetIndex + 1}`, String(asset.path || ''))"
-                            >
-                              <img v-if="assetUrl(asset)" :src="assetUrl(asset)" :alt="`结果 ${assetIndex + 1}`" loading="lazy" />
-                              <span v-else>无图片 URL</span>
-                            </button>
-                            <div v-if="message.assets.length > 1" class="studio-result-caption">
-                              <span>结果 {{ assetIndex + 1 }}</span>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    </template>
-                  </template>
-                </div>
-
-                <button
-                  v-if="message.isCollapsible"
-                  type="button"
-                  class="chat-message-expand"
-                  @click.stop="toggleMessageExpanded(message)"
-                >
-                  {{ message.isCollapsed ? '展开全部' : '收起' }}
-                  <Icon :icon="message.isCollapsed ? 'lucide:chevron-down' : 'lucide:chevron-up'" class="h-3.5 w-3.5" />
-                </button>
-              </div>
-            </div>
-          </div>
-        </article>
+          :message="message"
+          @action="handleMessageAction"
+          @toggle-expanded="toggleMessageExpanded"
+          @open-search-sources="openSearchSourcePanel"
+          @citation-click="scrollToCitationSource"
+          @preview="forwardPreview"
+          @reference-image="forwardReferenceImage"
+          @inpaint-image="forwardInpaintImage"
+          @compare-image="forwardCompareImage"
+        />
       </div>
     </div>
 
@@ -219,15 +61,7 @@
             <strong>参考来源</strong>
             <small>{{ activeSearchSourceMessage.searchSources?.length || 0 }} 条网页结果</small>
           </div>
-          <button
-            type="button"
-            class="studio-search-drawer-close"
-            aria-label="关闭参考来源"
-            title="关闭"
-            @click="closeSearchSourcePanel"
-          >
-            <Icon icon="lucide:x" class="h-4 w-4" />
-          </button>
+          <ModalCloseButton label="关闭参考来源" @click="closeSearchSourcePanel" />
         </header>
 
         <div class="studio-search-drawer-body custom-scrollbar">
@@ -258,7 +92,7 @@
 
 <script setup lang="ts">
 import { Icon } from '@iconify/vue'
-import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, ref, shallowRef, watch, type CSSProperties } from 'vue'
+import { computed, nextTick, onActivated, onBeforeUnmount, onMounted, ref, shallowRef, watch, type CSSProperties } from 'vue'
 import {
   imageAssetUrl,
   imageTaskProgressLabel,
@@ -267,14 +101,25 @@ import {
   type ImageTask,
   type ImageTaskAsset,
 } from '@/api/imageTasks'
-import type { StudioConversation, StudioMessage, StudioSearchImageGroup, StudioSearchSource } from './types'
-
-const StudioMarkdownContent = defineAsyncComponent(() => import('./StudioMarkdownContent.vue'))
+import ModalCloseButton from '@/components/ai/ModalCloseButton.vue'
+import StudioMessageItem, {
+  type StudioMessageActionKey,
+  type StudioMessageView,
+} from './StudioMessageItem.vue'
+import type {
+  StudioConversation,
+  StudioImageAssetView,
+  StudioImageCompareSource,
+  StudioMessage,
+  StudioReferenceImage,
+  StudioSearchImageGroup,
+  StudioSearchSource,
+} from './types'
 
 const props = defineProps<{
   conversation: StudioConversation | null
   conversationsCount: number
-  tasks: ImageTask[]
+  taskById: Map<string, ImageTask>
   fullscreen: boolean
 }>()
 
@@ -289,30 +134,10 @@ const emit = defineEmits<{
   'delete-message': [messageId: string]
   'copy-message': [content: string]
   preview: [src: string, name: string, localPath?: string]
+  'reference-image': [asset: StudioImageAssetView, name: string, message: StudioMessage]
+  'inpaint-image': [asset: StudioImageAssetView, name: string, message: StudioMessage]
+  'compare-image': [source: StudioImageCompareSource, asset: StudioImageAssetView, name: string]
 }>()
-
-type MessageActionKey = 'copy' | 'edit' | 'resend' | 'fill' | 'retry' | 'delete'
-interface MessageAction {
-  key: MessageActionKey
-  label: string
-  icon: string
-  danger?: boolean
-}
-
-type StudioMessageView = StudioMessage & {
-  memoKey: string
-  task?: ImageTask
-  assets: ImageTaskAsset[]
-  isImageMessage: boolean
-  isPendingImageMessage: boolean
-  imageSlotCount: number
-  pendingSlots: number[]
-  imagePendingStageText: string
-  primaryMessage: string
-  imagePreviewStyle?: CSSProperties
-  isCollapsible: boolean
-  isCollapsed: boolean
-}
 
 type MessageViewSignatureValue = string | number | boolean | null | undefined
 type MessageViewSignature = MessageViewSignatureValue[]
@@ -320,9 +145,14 @@ type MessageViewSignature = MessageViewSignatureValue[]
 const INITIAL_MESSAGE_LIMIT = 32
 const MESSAGE_BATCH_SIZE = 24
 const MAX_MESSAGE_VIEW_CACHE_SIZE = 480
-const MAX_STRING_SIGNATURE_CACHE_SIZE = 480
+const EMPTY_IMAGE_ASSETS: readonly ImageTaskAsset[] = []
+const SINGLE_IMAGE_MAX_WIDTH_REM = 18
+const SINGLE_IMAGE_MIN_WIDTH_REM = 11.5
+const MULTI_IMAGE_MAX_WIDTH_REM = 26
+const STICK_TO_BOTTOM_DISTANCE_PX = 160
 
 const scrollEl = ref<HTMLElement | null>(null)
+const turnsEl = ref<HTMLElement | null>(null)
 const showScrollLatest = ref(false)
 const visibleMessageLimit = ref(INITIAL_MESSAGE_LIMIT)
 const expandedMessageIds = ref<Set<string>>(new Set())
@@ -331,14 +161,12 @@ const highlightedSearchSourceId = ref('')
 const searchPanelMessageId = ref('')
 const displayedConversation = shallowRef<StudioConversation | null>(props.conversation)
 const messageViewCache = new Map<string, { signature: MessageViewSignature; revision: number; view: StudioMessageView }>()
-const stringSignatureCache = new Map<string, { value: string; signature: string }>()
-let conversationRenderFrameId: number | null = null
-let conversationRenderToken = 0
 let scrollLatestFrameId: number | null = null
 let scrollLatestToken = 0
 let searchSourceHighlightTimer: number | null = null
+let turnsResizeObserver: ResizeObserver | null = null
+let stickToBottom = true
 
-const taskById = computed(() => new Map(props.tasks.map((task) => [task.id, task])))
 const allMessages = computed(() => displayedConversation.value?.messages || [])
 const visibleMessages = computed(() => {
   const messages = allMessages.value
@@ -356,19 +184,23 @@ const activeSearchSourceMessage = computed(() => {
 })
 
 function buildMessageView(message: StudioMessage): StudioMessageView {
-  const task = message.taskId ? taskById.value.get(message.taskId) : undefined
-  const assets = task?.data?.length ? task.data.filter((asset) => Boolean(assetUrl(asset))) : []
+  const task = message.taskId ? props.taskById.get(message.taskId) : undefined
+  const taskAssets = task?.data?.length ? task.data : EMPTY_IMAGE_ASSETS
+  const renderableAssetCount = countRenderableImageAssets(taskAssets)
   const isImageMessage = message.role === 'assistant' && message.mode === 'image'
-  const imageSlotCount = computeImageSlotCount(message, task, assets.length)
+  const imageSlotCount = computeImageSlotCount(message, task, renderableAssetCount)
   const isCollapsible = computeIsCollapsibleMessage(message)
   const isCollapsed = isCollapsible ? computeIsMessageCollapsed(message) : false
-  const signature = messageViewSignature(message, task, assets, imageSlotCount, isCollapsed, isCollapsible)
+  const markdownContent = buildMarkdownDisplayContent(message)
+  const signature = messageViewSignature(message, task, taskAssets, renderableAssetCount, imageSlotCount, isCollapsed, isCollapsible, markdownContent)
   const cached = messageViewCache.get(message.id)
   if (cached && sameMessageViewSignature(cached.signature, signature)) {
     messageViewCache.delete(message.id)
     messageViewCache.set(message.id, cached)
     return cached.view
   }
+  const assets = buildImageAssetViews(taskAssets)
+  const isPendingImageMessage = isImageMessage && (!task || (task.status !== 'success' && task.status !== 'error' && assets.length === 0))
   const revision = (cached?.revision || 0) + 1
   const view: StudioMessageView = {
     ...message,
@@ -376,14 +208,16 @@ function buildMessageView(message: StudioMessage): StudioMessageView {
     task,
     assets,
     isImageMessage,
-    isPendingImageMessage: isImageMessage && (!task || (task.status !== 'success' && task.status !== 'error' && assets.length === 0)),
+    isPendingImageMessage,
+    isSingleImageResult: isImageMessage && !isPendingImageMessage && assets.length === 1,
     imageSlotCount,
     pendingSlots: Array.from({ length: imageSlotCount }, (_, index) => index),
     imagePendingStageText: imageTaskProgressLabel(task),
     primaryMessage: taskPrimaryMessage(task),
-    imagePreviewStyle: isImageMessage ? buildImagePreviewStyle(message, task, imageSlotCount) : undefined,
+    imagePreviewStyle: isImageMessage ? buildImagePreviewStyle(message, task, imageSlotCount, assets) : undefined,
     isCollapsible,
     isCollapsed,
+    markdownContent,
   }
   messageViewCache.set(message.id, { signature, revision, view })
   trimStringKeyCache(messageViewCache, MAX_MESSAGE_VIEW_CACHE_SIZE)
@@ -393,29 +227,34 @@ function buildMessageView(message: StudioMessage): StudioMessageView {
 function messageViewSignature(
   message: StudioMessage,
   task: ImageTask | undefined,
-  assets: ImageTaskAsset[],
+  taskAssets: readonly ImageTaskAsset[],
+  renderableAssetCount: number,
   imageSlotCount: number,
   isCollapsed: boolean,
   isCollapsible: boolean,
+  markdownContent: string,
 ): MessageViewSignature {
   return [
     message.id,
     message.role,
     message.mode,
-    compactStringSignature(message.content, `${message.id}:content`),
+    compactStringSignature(message.content),
     message.createdAt,
     message.status,
     message.model,
     message.imageSize,
     message.imageCount,
     message.taskId,
-    compactStringSignature(message.error, `${message.id}:error`),
+    compactStringSignature(message.error),
     arraySignature(message.attachments),
-    searchSourcesSignature(message.searchSources, message.id),
-    searchImageGroupsSignature(message.searchImageGroups, message.id),
+    referenceImagesSignature(message.referenceImages),
+    imageCompareSourceSignature(message.inpaintSource),
+    searchSourcesSignature(message.searchSources),
+    searchImageGroupsSignature(message.searchImageGroups),
     imageSlotCount,
     isCollapsible,
     isCollapsed,
+    compactStringSignature(markdownContent),
     task?.id,
     task?.status,
     task?.mode,
@@ -428,14 +267,15 @@ function messageViewSignature(
     task?.upstream_request_id,
     task?.blocked,
     task?.tool_invoked,
-    compactStringSignature(task?.error, `${task?.id || message.taskId}:error`),
-    compactStringSignature(task?.reason, `${task?.id || message.taskId}:reason`),
-    compactStringSignature(task?.upstream_message_preview, `${task?.id || message.taskId}:preview`),
-    compactStringSignature(task?.terminal_message, `${task?.id || message.taskId}:terminal`),
-    compactStringSignature(task?.upstream_error, `${task?.id || message.taskId}:upstream`),
-    compactStringSignature(task?.raw_error, `${task?.id || message.taskId}:raw`),
-    assets.length,
-    ...assets.map((asset, index) => assetSignature(asset, task?.id || message.taskId || message.id, index)),
+    compactStringSignature(task?.error),
+    compactStringSignature(task?.reason),
+    compactStringSignature(task?.upstream_message_preview),
+    compactStringSignature(task?.terminal_message),
+    compactStringSignature(task?.upstream_error),
+    compactStringSignature(task?.raw_error),
+    renderableAssetCount,
+    taskAssets.length,
+    ...taskAssets.map((asset) => assetSignature(asset)),
   ]
 }
 
@@ -449,68 +289,78 @@ function arraySignature(values: string[] | undefined) {
   return values.map((value) => compactStringSignature(value)).join('\u001f')
 }
 
-function searchSourcesSignature(sources: StudioSearchSource[] | undefined, ownerId: string) {
-  if (!sources?.length) return ''
-  return sources
-    .map((source, index) => [
+function referenceImagesSignature(images: StudioReferenceImage[] | undefined) {
+  if (!images?.length) return ''
+  return images
+    .map((image, index) => [
       index,
-      compactStringSignature(source.title, `${ownerId}:search:${index}:title`),
-      compactStringSignature(source.url, `${ownerId}:search:${index}:url`),
-      compactStringSignature(source.snippet, `${ownerId}:search:${index}:snippet`),
+      compactStringSignature(image.id),
+      compactStringSignature(image.name),
+      compactStringSignature(image.type),
+      image.size || 0,
+      compactStringSignature(image.dataUrl),
     ].join('\u001e'))
     .join('\u001f')
 }
 
-function searchImageGroupsSignature(groups: StudioSearchImageGroup[] | undefined, ownerId: string) {
+function imageCompareSourceSignature(source: StudioImageCompareSource | undefined) {
+  if (!source) return ''
+  return [
+    compactStringSignature(source.src),
+    compactStringSignature(source.name),
+    compactStringSignature(source.localPath),
+  ].join('\u001f')
+}
+
+function searchSourcesSignature(sources: StudioSearchSource[] | undefined) {
+  if (!sources?.length) return ''
+  return sources
+    .map((source, index) => [
+      index,
+      compactStringSignature(source.title),
+      compactStringSignature(source.url),
+      compactStringSignature(source.snippet),
+    ].join('\u001e'))
+    .join('\u001f')
+}
+
+function searchImageGroupsSignature(groups: StudioSearchImageGroup[] | undefined) {
   if (!groups?.length) return ''
   return groups
     .map((group, index) => [
       index,
-      compactStringSignature(group.aspectRatio, `${ownerId}:image-group:${index}:aspect`),
+      compactStringSignature(group.aspectRatio),
       group.numPerQuery || '',
       arraySignature(group.queries),
     ].join('\u001e'))
     .join('\u001f')
 }
 
-function assetSignature(asset: ImageTaskAsset, ownerId: string, index: number) {
+function assetSignature(asset: ImageTaskAsset) {
   return [
-    compactStringSignature(asset.url, `${ownerId}:asset:${index}:url`),
-    compactStringSignature(asset.path, `${ownerId}:asset:${index}:path`),
-    compactStringSignature(asset.b64_json, `${ownerId}:asset:${index}:b64`),
+    compactStringSignature(asset.url),
+    compactStringSignature(asset.path),
+    compactStringSignature(asset.b64_json),
+    positiveDimension(asset.width) || '',
+    positiveDimension(asset.height) || '',
   ].join('\u001f')
 }
 
-function compactStringSignature(value: unknown, cacheKey = '') {
+function compactStringSignature(value: unknown) {
   const text = String(value ?? '')
   if (!text) return ''
   if (text.length <= 192) return text
-  if (cacheKey) {
-    const cached = stringSignatureCache.get(cacheKey)
-    if (cached?.value === text) {
-      stringSignatureCache.delete(cacheKey)
-      stringSignatureCache.set(cacheKey, cached)
-      return cached.signature
-    }
-    const signature = createLongStringSignature(text)
-    stringSignatureCache.set(cacheKey, { value: text, signature })
-    trimStringKeyCache(stringSignatureCache, MAX_STRING_SIGNATURE_CACHE_SIZE)
-    return signature
-  }
   return createLongStringSignature(text)
 }
 
 function createLongStringSignature(value: string) {
-  return `${value.length}:${hashString(value)}:${value.slice(0, 24)}:${value.slice(-24)}`
-}
-
-function hashString(value: string) {
-  let hash = 2166136261
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index)
-    hash = Math.imul(hash, 16777619)
-  }
-  return (hash >>> 0).toString(36)
+  const middle = Math.floor(value.length / 2)
+  return [
+    value.length,
+    value.slice(0, 32),
+    value.slice(Math.max(0, middle - 16), middle + 16),
+    value.slice(-32),
+  ].join(':')
 }
 
 watch(() => props.conversation, (conversation, previousConversation) => {
@@ -518,18 +368,63 @@ watch(() => props.conversation, (conversation, previousConversation) => {
     displayedConversation.value = conversation
     return
   }
-  scheduleConversationRender(conversation)
+  stickToBottom = true
+  displayedConversation.value = conversation
 })
 
 watch(() => displayedConversation.value?.id, () => {
   visibleMessageLimit.value = INITIAL_MESSAGE_LIMIT
   showScrollLatest.value = false
   closeSearchSourcePanel()
-  scheduleScrollToLatest()
+  settleScrollToLatest()
 })
 
-function assetUrl(asset: ImageTaskAsset) {
-  return imageAssetUrl(asset)
+watch(turnsEl, (element, previousElement) => {
+  if (turnsResizeObserver && previousElement) {
+    turnsResizeObserver.unobserve(previousElement)
+  }
+  if (!element) return
+  if (typeof ResizeObserver === 'undefined') return
+  if (!turnsResizeObserver) {
+    turnsResizeObserver = new ResizeObserver(() => {
+      keepLatestMessageAnchored()
+    })
+  }
+  turnsResizeObserver.observe(element)
+  if (stickToBottom) scrollToBottomNow()
+})
+
+function buildImageAssetViews(assets: readonly ImageTaskAsset[]): StudioImageAssetView[] {
+  if (!assets.length) return []
+  const views: StudioImageAssetView[] = []
+  for (const asset of assets) {
+    const url = imageAssetUrl(asset)
+    if (!url) continue
+    views.push({
+      url,
+      path: String(asset.path || ''),
+      width: positiveDimension(asset.width),
+      height: positiveDimension(asset.height),
+    })
+  }
+  return views
+}
+
+function positiveDimension(value: unknown) {
+  const dimension = Number(value)
+  return Number.isFinite(dimension) && dimension > 0 ? Math.trunc(dimension) : undefined
+}
+
+function countRenderableImageAssets(assets: readonly ImageTaskAsset[]) {
+  let count = 0
+  for (const asset of assets) {
+    if (cleanAssetText(asset.url) || cleanAssetText(asset.b64_json)) count += 1
+  }
+  return count
+}
+
+function cleanAssetText(value: unknown) {
+  return String(value ?? '').trim()
 }
 
 function isLiveMessage(message: StudioMessage) {
@@ -537,7 +432,7 @@ function isLiveMessage(message: StudioMessage) {
     return true
   }
   if (!message.taskId) return false
-  const task = taskById.value.get(message.taskId)
+  const task = props.taskById.get(message.taskId)
   return Boolean(task && task.status !== 'success' && task.status !== 'error')
 }
 
@@ -555,13 +450,30 @@ function computeImageSlotCount(message: StudioMessage, task: ImageTask | undefin
   return Math.min(4, Math.max(1, Math.trunc(count)))
 }
 
-function buildImagePreviewStyle(message: StudioMessage, task: ImageTask | undefined, imageSlotCount: number): CSSProperties {
-  const parsed = parseImageSize(task?.size || message.imageSize || '')
-  const aspectRatio = parsed ? `${parsed.width} / ${parsed.height}` : '1 / 1'
+function buildImagePreviewStyle(
+  message: StudioMessage,
+  task: ImageTask | undefined,
+  imageSlotCount: number,
+  assets: readonly StudioImageAssetView[],
+): CSSProperties {
+  const aspect = imageAssetAspect(assets) || parseImageSize(task?.size || message.imageSize || '') || { width: 1, height: 1 }
+  const aspectRatio = `${aspect.width} / ${aspect.height}`
   return {
     '--studio-image-aspect-ratio': aspectRatio,
     '--studio-image-grid-columns': String(Math.min(2, imageSlotCount)),
+    '--studio-image-message-width': imageMessageWidth(aspect, imageSlotCount),
   } as CSSProperties
+}
+
+function imageAssetAspect(assets: readonly StudioImageAssetView[]) {
+  const asset = assets.find((item) => item.width && item.height)
+  return asset?.width && asset.height ? { width: asset.width, height: asset.height } : null
+}
+
+function imageMessageWidth(aspect: { width: number; height: number }, imageSlotCount: number) {
+  if (imageSlotCount > 1) return `${MULTI_IMAGE_MAX_WIDTH_REM}rem`
+  if (aspect.width >= aspect.height) return `${SINGLE_IMAGE_MAX_WIDTH_REM}rem`
+  return `clamp(${SINGLE_IMAGE_MIN_WIDTH_REM}rem, calc(${SINGLE_IMAGE_MAX_WIDTH_REM}rem * ${aspect.width} / ${aspect.height}), ${SINGLE_IMAGE_MAX_WIDTH_REM}rem)`
 }
 
 function sourceTitle(source: StudioSearchSource, index: number) {
@@ -635,46 +547,57 @@ function trimStringKeyCache<T>(cache: Map<string, T>, maxSize: number) {
   }
 }
 
-function scheduleConversationRender(conversation: StudioConversation | null) {
-  const token = ++conversationRenderToken
-  if (conversationRenderFrameId !== null) {
-    window.cancelAnimationFrame(conversationRenderFrameId)
-  }
-  conversationRenderFrameId = window.requestAnimationFrame(() => {
-    conversationRenderFrameId = null
-    if (token !== conversationRenderToken) return
-    displayedConversation.value = conversation
-  })
-}
-
 function scheduleScrollToLatest() {
   const token = ++scrollLatestToken
-  if (scrollLatestFrameId !== null) {
-    window.cancelAnimationFrame(scrollLatestFrameId)
-  }
+  cancelScheduledScrollToLatest()
   scrollLatestFrameId = window.requestAnimationFrame(() => {
     scrollLatestFrameId = null
     if (token !== scrollLatestToken) return
-    scrollToBottom()
+    scrollToBottomNow()
     window.requestAnimationFrame(() => {
-      if (token === scrollLatestToken) scrollToBottom()
+      if (token === scrollLatestToken) scrollToBottomNow()
     })
   })
 }
 
-onBeforeUnmount(() => {
-  if (conversationRenderFrameId !== null) {
-    window.cancelAnimationFrame(conversationRenderFrameId)
-    conversationRenderFrameId = null
-  }
+function cancelScheduledScrollToLatest() {
   if (scrollLatestFrameId !== null) {
     window.cancelAnimationFrame(scrollLatestFrameId)
     scrollLatestFrameId = null
   }
+}
+
+function settleScrollToLatest() {
+  stickToBottom = true
+  scrollToBottomNow()
+  void nextTick(() => {
+    scrollToBottomNow()
+    scheduleScrollToLatest()
+  })
+}
+
+function keepLatestMessageAnchored() {
+  if (!stickToBottom) return
+  scrollToBottomNow()
+  scheduleScrollToLatest()
+}
+
+onMounted(() => {
+  settleScrollToLatest()
+})
+
+onActivated(() => {
+  settleScrollToLatest()
+})
+
+onBeforeUnmount(() => {
+  cancelScheduledScrollToLatest()
   if (searchSourceHighlightTimer !== null) {
     window.clearTimeout(searchSourceHighlightTimer)
     searchSourceHighlightTimer = null
   }
+  turnsResizeObserver?.disconnect()
+  turnsResizeObserver = null
 })
 
 function isTextLikeMessage(message: StudioMessage) {
@@ -682,6 +605,7 @@ function isTextLikeMessage(message: StudioMessage) {
 }
 
 function computeIsCollapsibleMessage(message: StudioMessage) {
+  if (isLiveMessage(message)) return false
   if (!isTextLikeMessage(message)) return false
   const content = String(message.content || message.error || '')
   if (!content.trim()) return false
@@ -691,6 +615,15 @@ function computeIsCollapsibleMessage(message: StudioMessage) {
 function computeIsMessageCollapsed(message: StudioMessage) {
   if (message.role === 'assistant') return collapsedMessageIds.value.has(message.id)
   return !expandedMessageIds.value.has(message.id)
+}
+
+function computeShouldRenderMarkdown(message: StudioMessage) {
+  return message.role === 'assistant' && message.mode !== 'image' && Boolean(message.content || message.status === 'streaming')
+}
+
+function buildMarkdownDisplayContent(message: StudioMessage) {
+  if (!computeShouldRenderMarkdown(message)) return ''
+  return String(message.content || '')
 }
 
 function toggleMessageExpanded(message: StudioMessage) {
@@ -717,21 +650,7 @@ async function showOlderMessages() {
   el.scrollTop = previousTop + Math.max(0, el.scrollHeight - previousHeight)
 }
 
-function messageActions(message: StudioMessage): MessageAction[] {
-  const actions: MessageAction[] = []
-  if (message.content) actions.push({ key: 'copy', label: '复制', icon: 'lucide:copy' })
-  if (message.role === 'user') {
-    if (message.content) actions.push({ key: 'edit', label: '编辑', icon: 'lucide:pencil' })
-    actions.push({ key: 'resend', label: '重发', icon: 'lucide:refresh-cw' })
-    if (message.content) actions.push({ key: 'fill', label: '填入', icon: 'lucide:clipboard-paste' })
-  } else if (message.mode !== 'image' || message.status === 'error') {
-    actions.push({ key: 'retry', label: '重试', icon: 'lucide:refresh-cw' })
-  }
-  actions.push({ key: 'delete', label: '删除', icon: 'lucide:trash-2', danger: true })
-  return actions
-}
-
-function handleMessageAction(action: MessageActionKey, message: StudioMessage) {
+function handleMessageAction(action: StudioMessageActionKey, message: StudioMessage) {
   if (action === 'copy') emit('copy-message', message.content)
   else if (action === 'edit') emit('edit', message)
   else if (action === 'resend') emit('resend', message)
@@ -740,21 +659,51 @@ function handleMessageAction(action: MessageActionKey, message: StudioMessage) {
   else if (action === 'delete') emit('delete-message', message.id)
 }
 
+function forwardPreview(src: string, name: string, localPath = '') {
+  emit('preview', src, name, localPath)
+}
+
+function forwardReferenceImage(asset: StudioImageAssetView, name: string, message: StudioMessage) {
+  emit('reference-image', asset, name, message)
+}
+
+function forwardInpaintImage(asset: StudioImageAssetView, name: string, message: StudioMessage) {
+  emit('inpaint-image', asset, name, message)
+}
+
+function forwardCompareImage(source: StudioImageCompareSource, asset: StudioImageAssetView, name: string) {
+  emit('compare-image', source, asset, name)
+}
+
 function handleScroll() {
   const el = scrollEl.value
   if (!el) return
-  showScrollLatest.value = el.scrollHeight - el.scrollTop - el.clientHeight > 160
+  const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+  stickToBottom = distanceToBottom <= STICK_TO_BOTTOM_DISTANCE_PX
+  showScrollLatest.value = !stickToBottom
 }
 
 function scrollToBottom() {
+  scrollToBottomNow()
+}
+
+function scrollToBottomNow() {
   const el = scrollEl.value
-  if (!el) return
+  if (!el) return false
+  stickToBottom = true
   el.scrollTop = el.scrollHeight
   showScrollLatest.value = false
+  return true
 }
 
 defineExpose({
-  scrollToBottom: () => nextTick(scrollToBottom),
+  scrollToBottom: async () => {
+    stickToBottom = true
+    await nextTick()
+    scrollToBottomNow()
+    await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()))
+    scrollToBottomNow()
+  },
 })
 </script>
 
@@ -765,7 +714,8 @@ defineExpose({
   min-height: 0;
   flex: 1 1 auto;
   flex-direction: column;
-  --studio-image-slot-size: clamp(12rem, 28vw, 18rem);
+  --studio-message-width: min(100%, 52rem);
+  --studio-image-message-width: 18rem;
   --studio-image-aspect-ratio: 1 / 1;
   --studio-image-grid-columns: 1;
 }
@@ -774,8 +724,10 @@ defineExpose({
   min-height: 0;
   flex: 1;
   overflow-y: auto;
+  overflow-anchor: none;
+  scroll-behavior: auto;
   overscroll-behavior: contain;
-  padding: 1rem clamp(0.75rem, 2.4vw, 1.75rem) calc(var(--studio-composer-height, 10rem) + 1rem);
+  padding: 1rem clamp(0.75rem, 2.4vw, 1.75rem) calc(var(--studio-composer-height, 10rem) + 0.5rem);
 }
 
 .studio-chat-empty {
@@ -843,370 +795,6 @@ defineExpose({
   color: var(--ui-fg-strong, hsl(var(--foreground)));
 }
 
-.chat-message-row {
-  display: flex;
-}
-
-.chat-message-row.is-user {
-  justify-content: flex-end;
-}
-
-.chat-message-row.is-assistant {
-  justify-content: flex-start;
-}
-
-.chat-message-container {
-  display: flex;
-  min-width: 0;
-  max-width: min(100%, 44rem);
-  width: fit-content;
-  flex-direction: column;
-}
-
-.chat-message-container.is-pending-image-message {
-  width: fit-content;
-  min-width: 0;
-  max-width: 100%;
-}
-
-.chat-message-container.is-user {
-  align-items: flex-end;
-}
-
-.chat-message-container.is-assistant {
-  align-items: flex-start;
-}
-
-.chat-message-header {
-  display: flex;
-  min-height: 1.75rem;
-  align-items: center;
-  gap: 0.5rem;
-  margin-bottom: 0.25rem;
-}
-
-.chat-message-header.is-user {
-  flex-direction: row-reverse;
-}
-
-.chat-message-avatar {
-  display: flex;
-  width: 1.75rem;
-  height: 1.75rem;
-  flex: 0 0 1.75rem;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--ui-control-border, hsl(var(--border)));
-  border-radius: 999px;
-  background: var(--ui-control-bg, hsl(var(--background)));
-  color: var(--ui-fg-muted, hsl(var(--muted-foreground)));
-  font-size: 0.6875rem;
-  font-weight: 600;
-}
-
-.chat-message-avatar-user {
-  border-color: var(--ui-accent-border, hsl(var(--foreground) / 0.18));
-  background: var(--ui-accent-soft, hsl(var(--secondary)));
-  color: var(--ui-accent-strong, hsl(var(--foreground)));
-}
-
-.chat-message-actions {
-  display: flex;
-  min-width: 0;
-  max-width: min(26rem, calc(100vw - 8rem));
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.25rem;
-  opacity: 1;
-  transition: opacity var(--ui-duration-normal, 180ms) var(--ui-ease-out, ease);
-}
-
-@media (min-width: 640px) {
-  .chat-message-actions {
-    pointer-events: none;
-    opacity: 0;
-  }
-
-  .chat-message-container:hover .chat-message-actions,
-  .chat-message-container:focus-within .chat-message-actions {
-    pointer-events: auto;
-    opacity: 1;
-  }
-}
-
-.chat-input-action {
-  display: inline-flex;
-  box-sizing: border-box;
-  min-height: 1.625rem;
-  height: 1.625rem;
-  align-items: center;
-  justify-content: center;
-  gap: 0.3125rem;
-  overflow: hidden;
-  border: 1px solid transparent;
-  border-radius: 999px;
-  background: transparent;
-  color: var(--ui-fg-muted, hsl(var(--muted-foreground)));
-  padding: 0.25rem 0.625rem;
-  font-size: 0.75rem;
-  font-weight: 600;
-  line-height: 1;
-  transition: border-color 0.15s, background 0.15s, color 0.15s;
-}
-
-.chat-input-action:hover,
-.chat-input-action:focus-visible {
-  border-color: var(--ui-control-hover-border, hsl(var(--foreground) / 0.18));
-  background: var(--ui-control-hover-bg, hsl(var(--secondary)));
-  color: var(--ui-fg-strong, hsl(var(--foreground)));
-}
-
-.chat-input-action .icon {
-  display: inline-flex;
-  width: 1rem;
-  height: 1rem;
-  flex: 0 0 1rem;
-  align-items: center;
-  justify-content: center;
-  line-height: 0;
-}
-
-.chat-input-action .text {
-  display: inline-block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  pointer-events: none;
-}
-
-.chat-message-action {
-  width: 1.85rem;
-  min-width: 1.85rem;
-  height: 1.85rem;
-  min-height: 1.85rem;
-  padding: 0.25rem;
-}
-
-.chat-message-action .text {
-  display: none;
-}
-
-.chat-message-action-danger:hover,
-.chat-message-action-danger:focus-visible {
-  border-color: var(--ui-danger-border, rgb(248 113 113 / 0.32));
-  background: var(--ui-danger-bg, rgb(254 242 242 / 0.86));
-  color: var(--ui-danger-fg, rgb(220 38 38));
-}
-
-.chat-message-bubble {
-  max-width: 100%;
-  border: 1px solid var(--ui-panel-border, hsl(var(--border)));
-  border-radius: 18px;
-  background: var(--ui-panel-bg, hsl(var(--card)));
-  box-shadow: var(--ui-panel-shadow, 0 8px 24px rgb(15 23 42 / 0.045));
-  color: var(--ui-fg-strong, hsl(var(--foreground)));
-  padding: 0.625rem 0.875rem;
-  font-size: 0.875rem;
-  line-height: 1.75;
-}
-
-.chat-message-bubble-wrap {
-  position: relative;
-  max-width: 100%;
-}
-
-.chat-message-content {
-  position: relative;
-  max-width: 100%;
-  overflow-wrap: anywhere;
-}
-
-.chat-message-content.is-collapsible {
-  overflow: hidden;
-  transition: max-height 0.18s ease;
-}
-
-.chat-message-content.is-collapsed {
-  max-height: 12rem;
-}
-
-.chat-message-content.is-collapsed::after {
-  position: absolute;
-  right: 0;
-  bottom: 0;
-  left: 0;
-  height: 3.25rem;
-  pointer-events: none;
-  background: linear-gradient(180deg, transparent, var(--studio-bubble-fade-bg, hsl(var(--card))));
-  content: '';
-}
-
-.chat-message-expand {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.25rem;
-  margin-top: 0.5rem;
-  border-radius: 999px;
-  color: hsl(var(--muted-foreground));
-  font-size: 0.75rem;
-  font-weight: 650;
-  line-height: 1;
-  transition: color 0.15s, background 0.15s;
-}
-
-.chat-message-expand:hover,
-.chat-message-expand:focus-visible {
-  color: hsl(var(--foreground));
-}
-
-.chat-message-bubble-user {
-  --studio-bubble-fade-bg: hsl(var(--secondary));
-  border-color: var(--ui-accent-border, hsl(var(--foreground) / 0.16));
-  background: var(--ui-accent-soft, hsl(var(--secondary)));
-}
-
-.chat-message-bubble-assistant {
-  --studio-bubble-fade-bg: hsl(var(--card));
-  border-color: var(--ui-panel-border, hsl(var(--border)));
-}
-
-.chat-message-bubble-image {
-  width: fit-content;
-  min-width: 0;
-  padding: 0.75rem;
-}
-
-.chat-message-bubble-image-pending {
-  padding: 0.75rem;
-}
-
-.chat-message-bubble-error {
-  --studio-bubble-fade-bg: rgb(254 242 242);
-  border-color: rgb(254 202 202);
-  background: rgb(254 242 242);
-}
-
-.studio-user-prompt {
-  margin: 0;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-.studio-attachment-line {
-  display: flex;
-  align-items: center;
-  gap: 0.35rem;
-  margin-top: 0.45rem;
-  color: hsl(var(--muted-foreground));
-  font-size: 0.75rem;
-}
-
-.studio-search-source-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.42rem;
-  margin-top: 0.65rem;
-  border: 1px solid hsl(var(--primary) / 0.18);
-  border-radius: 999px;
-  background:
-    linear-gradient(135deg, hsl(var(--primary) / 0.1), hsl(var(--muted) / 0.42));
-  color: hsl(var(--foreground));
-  padding: 0.34rem 0.68rem 0.34rem 0.5rem;
-  font-size: 0.72rem;
-  font-weight: 720;
-  line-height: 1;
-  box-shadow: 0 8px 22px hsl(var(--primary) / 0.08);
-  transition: border-color 0.15s, background 0.15s, box-shadow 0.15s, transform 0.15s;
-}
-
-.studio-search-source-chip-icon {
-  flex: 0 0 auto;
-  color: hsl(var(--primary));
-}
-
-.studio-search-source-chip-label {
-  color: hsl(var(--foreground));
-}
-
-.studio-search-source-chip strong {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 1.15rem;
-  height: 1.15rem;
-  border-radius: 999px;
-  background: hsl(var(--primary) / 0.13);
-  color: hsl(var(--primary));
-  font-size: 0.68rem;
-  font-weight: 820;
-}
-
-.studio-search-source-chip small {
-  border-left: 1px solid hsl(var(--primary) / 0.16);
-  padding-left: 0.42rem;
-  color: hsl(var(--muted-foreground));
-  font-size: 0.68rem;
-  font-weight: 780;
-}
-
-.studio-search-source-chip:hover,
-.studio-search-source-chip:focus-visible {
-  border-color: hsl(var(--primary) / 0.34);
-  background:
-    linear-gradient(135deg, hsl(var(--primary) / 0.14), hsl(var(--secondary) / 0.72));
-  box-shadow: 0 10px 26px hsl(var(--primary) / 0.12);
-  transform: translateY(-1px);
-}
-
-.studio-search-image-groups {
-  display: grid;
-  gap: 0.45rem;
-  margin-top: 0.65rem;
-}
-
-.studio-search-image-group {
-  display: grid;
-  gap: 0.42rem;
-  border: 1px solid hsl(var(--border) / 0.68);
-  border-radius: 0.78rem;
-  background: hsl(var(--muted) / 0.32);
-  padding: 0.56rem 0.62rem;
-}
-
-.studio-search-image-group-title {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
-  color: hsl(var(--foreground));
-  font-size: 0.72rem;
-  font-weight: 780;
-  line-height: 1;
-}
-
-.studio-search-image-group-title svg {
-  color: hsl(var(--primary));
-}
-
-.studio-search-image-group-queries {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.32rem;
-}
-
-.studio-search-image-query {
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  border: 1px solid hsl(var(--border) / 0.62);
-  border-radius: 999px;
-  background: hsl(var(--background) / 0.72);
-  padding: 0.24rem 0.48rem;
-  color: hsl(var(--muted-foreground));
-  font-size: 0.68rem;
-  font-weight: 650;
-}
-
 .studio-search-drawer-backdrop {
   position: absolute;
   inset: 0;
@@ -1258,27 +846,6 @@ defineExpose({
   color: hsl(var(--muted-foreground));
   font-size: 0.72rem;
   font-weight: 650;
-}
-
-.studio-search-drawer-close {
-  display: inline-flex;
-  width: 2rem;
-  height: 2rem;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid hsl(var(--border) / 0.72);
-  border-radius: 999px;
-  background: hsl(var(--background));
-  color: hsl(var(--muted-foreground));
-  transition: border-color 0.15s, background 0.15s, color 0.15s;
-}
-
-.studio-search-drawer-close:hover,
-.studio-search-drawer-close:focus-visible {
-  border-color: hsl(var(--foreground) / 0.18);
-  background: hsl(var(--secondary));
-  color: hsl(var(--foreground));
 }
 
 .studio-search-drawer-body {
@@ -1422,336 +989,6 @@ defineExpose({
   }
 }
 
-.chat-message-bubble :deep(a[href^='studio-citation:']) {
-  display: inline-flex;
-  min-width: 1.12rem;
-  height: 1.12rem;
-  align-items: center;
-  justify-content: center;
-  margin: 0 0.08rem;
-  border: 1px solid var(--ui-accent-border, hsl(var(--primary) / 0.28));
-  border-radius: 999px;
-  background: var(--ui-accent-soft, hsl(var(--primary) / 0.08));
-  color: var(--ui-accent-strong, hsl(var(--primary)));
-  font-size: 0.68em;
-  font-weight: 800;
-  line-height: 1;
-  text-decoration: none;
-  vertical-align: super;
-}
-
-.chat-message-bubble :deep(a[href^='studio-citation:']:hover),
-.chat-message-bubble :deep(a[href^='studio-citation:']:focus-visible) {
-  border-color: var(--ui-accent-border, hsl(var(--primary) / 0.5));
-  background: hsl(var(--primary) / 0.12);
-}
-
-.chat-markdown {
-  min-width: 0;
-  overflow-wrap: anywhere;
-  word-break: break-word;
-}
-
-.chat-markdown :deep(> :first-child) {
-  margin-top: 0;
-}
-
-.chat-markdown :deep(> :last-child) {
-  margin-bottom: 0;
-}
-
-.chat-markdown :deep(p) {
-  margin: 0.35rem 0;
-}
-
-.chat-markdown :deep(ul),
-.chat-markdown :deep(ol) {
-  margin: 0.55rem 0;
-  padding-left: 1.25rem;
-}
-
-.chat-markdown :deep(ul) {
-  list-style: disc;
-}
-
-.chat-markdown :deep(ol) {
-  list-style: decimal;
-}
-
-.chat-markdown :deep(li) {
-  margin: 0.25rem 0;
-}
-
-.chat-markdown :deep(blockquote) {
-  margin: 0.75rem 0;
-  border-left: 3px solid rgb(113 113 122 / 0.32);
-  padding-left: 0.75rem;
-  color: hsl(var(--muted-foreground));
-}
-
-.chat-markdown :deep(pre) {
-  overflow-x: auto;
-  overflow-wrap: normal;
-  word-break: normal;
-  border: 1px solid hsl(var(--border));
-  border-radius: 0.5rem;
-  background: hsl(var(--muted) / 0.45);
-  padding: 0.75rem;
-  font-size: 0.8125rem;
-}
-
-.chat-markdown :deep(code) {
-  border-radius: 0.35rem;
-  background: hsl(var(--muted) / 0.55);
-  padding: 0.1rem 0.25rem;
-  font-size: 0.84em;
-}
-
-.chat-markdown :deep(pre code) {
-  background: transparent;
-  padding: 0;
-}
-
-.chat-markdown :deep(.studio-code-block) {
-  margin: 0.75rem 0;
-  overflow: hidden;
-  border: 1px solid hsl(var(--border));
-  border-radius: 0.875rem;
-  background: hsl(var(--muted) / 0.36);
-}
-
-.chat-markdown :deep(.studio-code-header) {
-  display: flex;
-  min-height: 2.25rem;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
-  border-bottom: 1px solid hsl(var(--border));
-  background: hsl(var(--background) / 0.72);
-  padding: 0.35rem 0.5rem 0.35rem 0.75rem;
-  color: hsl(var(--muted-foreground));
-  font-size: 0.72rem;
-  font-weight: 650;
-  line-height: 1;
-}
-
-.chat-markdown :deep(.studio-code-copy) {
-  display: inline-flex;
-  height: 1.55rem;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid transparent;
-  border-radius: 999px;
-  padding: 0 0.625rem;
-  color: hsl(var(--muted-foreground));
-  font-size: 0.72rem;
-  font-weight: 650;
-  line-height: 1;
-  transition: background 0.15s, border-color 0.15s, color 0.15s;
-}
-
-.chat-markdown :deep(.studio-code-copy:hover),
-.chat-markdown :deep(.studio-code-copy:focus-visible) {
-  border-color: hsl(var(--foreground) / 0.14);
-  background: hsl(var(--secondary));
-  color: hsl(var(--foreground));
-}
-
-.chat-markdown :deep(.studio-code-pre) {
-  margin: 0;
-  overflow-x: auto;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  padding: 0.75rem 0.875rem;
-  color: hsl(var(--foreground));
-  font-size: 0.78rem;
-  line-height: 1.65;
-}
-
-.chat-markdown :deep(.studio-code-pre code) {
-  display: block;
-  min-width: max-content;
-  background: transparent;
-  padding: 0;
-  font-family: var(--font-ui-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace);
-}
-
-.chat-markdown :deep(.hljs-comment),
-.chat-markdown :deep(.hljs-quote) {
-  color: #6b7280;
-}
-
-.chat-markdown :deep(.hljs-keyword),
-.chat-markdown :deep(.hljs-selector-tag),
-.chat-markdown :deep(.hljs-subst) {
-  color: #7c3aed;
-}
-
-.chat-markdown :deep(.hljs-string),
-.chat-markdown :deep(.hljs-doctag) {
-  color: #047857;
-}
-
-.chat-markdown :deep(.hljs-number),
-.chat-markdown :deep(.hljs-literal),
-.chat-markdown :deep(.hljs-variable),
-.chat-markdown :deep(.hljs-template-variable),
-.chat-markdown :deep(.hljs-tag .hljs-attr) {
-  color: #b45309;
-}
-
-.chat-markdown :deep(.hljs-title),
-.chat-markdown :deep(.hljs-section),
-.chat-markdown :deep(.hljs-selector-id) {
-  color: #2563eb;
-}
-
-.chat-markdown :deep(.hljs-type),
-.chat-markdown :deep(.hljs-class .hljs-title) {
-  color: #0f766e;
-}
-
-.chat-markdown :deep(.hljs-tag),
-.chat-markdown :deep(.hljs-name),
-.chat-markdown :deep(.hljs-attribute) {
-  color: #be123c;
-}
-
-.studio-error-text {
-  margin-top: 0.45rem;
-  color: rgb(190 18 60);
-  font-size: 0.8125rem;
-  line-height: 1.6;
-}
-
-.studio-cursor {
-  display: inline-block;
-  width: 0.45rem;
-  height: 1rem;
-  border-radius: 999px;
-  background: hsl(var(--primary));
-  animation: studio-cursor 1s ease-in-out infinite;
-}
-
-@keyframes studio-cursor {
-  0%, 100% { opacity: 0.2; }
-  50% { opacity: 1; }
-}
-
-.studio-image-status {
-  display: flex;
-  min-width: 0;
-  width: 100%;
-  min-height: 3.25rem;
-  align-items: center;
-  gap: 0.5rem;
-  color: hsl(var(--muted-foreground));
-  font-size: 0.8125rem;
-  line-height: 1.6;
-}
-
-.studio-image-status.is-error {
-  align-items: flex-start;
-  color: rgb(185 28 28);
-}
-
-.studio-result-block {
-  display: inline-block;
-  max-width: 100%;
-}
-
-.studio-result-grid {
-  display: grid;
-  width: fit-content;
-  max-width: 100%;
-  grid-template-columns: repeat(var(--studio-image-grid-columns), minmax(0, var(--studio-image-slot-size)));
-  gap: 0.625rem;
-}
-
-.studio-result-grid.is-single {
-  grid-template-columns: minmax(0, var(--studio-image-slot-size));
-}
-
-.studio-result-item {
-  width: var(--studio-image-slot-size);
-  min-width: 0;
-}
-
-.studio-result-grid.is-single .studio-result-item {
-  width: var(--studio-image-slot-size);
-}
-
-.studio-result-media {
-  display: flex;
-  width: 100%;
-  aspect-ratio: var(--studio-image-aspect-ratio);
-  align-items: center;
-  justify-content: center;
-  overflow: hidden;
-  border: 1px solid hsl(var(--border) / 0.72);
-  border-radius: 0.75rem;
-  background: hsl(var(--secondary) / 0.35);
-  color: inherit;
-  cursor: zoom-in;
-}
-
-.studio-result-media.has-image {
-  background: hsl(var(--secondary) / 0.18);
-  padding: 0;
-}
-
-.studio-result-media img {
-  display: block;
-  width: 100%;
-  height: 100%;
-  max-width: none;
-  max-height: none;
-  border-radius: 0.75rem;
-  object-fit: contain;
-}
-
-.studio-result-media span {
-  color: hsl(var(--muted-foreground));
-  font-size: 0.8125rem;
-}
-
-.studio-result-placeholder {
-  cursor: default;
-  flex-direction: column;
-  gap: 0.625rem;
-  text-align: center;
-}
-
-.studio-result-placeholder svg {
-  color: hsl(var(--muted-foreground));
-}
-
-.studio-result-placeholder span,
-.studio-result-placeholder small {
-  display: block;
-  max-width: calc(100% - 1rem);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.studio-result-placeholder small {
-  color: hsl(var(--muted-foreground) / 0.78);
-  font-size: 0.75rem;
-}
-
-.studio-result-caption {
-  display: flex;
-  min-width: 0;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.45rem;
-  padding: 0.35rem 0.125rem 0;
-  color: hsl(var(--muted-foreground));
-  font-size: 0.75rem;
-}
-
 .studio-scroll-latest {
   position: absolute;
   left: 50%;
@@ -1773,7 +1010,7 @@ defineExpose({
 
 @media (max-width: 720px) {
   .studio-chat-scroll {
-    padding: 0.75rem 0.75rem calc(var(--studio-composer-height, 9rem) + 0.75rem);
+    padding: 0.75rem 0.75rem calc(var(--studio-composer-height, 9rem) + 0.5rem);
   }
 
   .studio-scroll-latest {
@@ -1784,29 +1021,9 @@ defineExpose({
     gap: 1rem;
   }
 
-  .chat-message-container {
-    max-width: min(100%, 38rem);
-  }
-
-  .chat-message-container.is-pending-image-message {
-    width: fit-content;
-    min-width: 0;
-    max-width: 100%;
-  }
-
   .studio-chat-panel {
-    --studio-image-slot-size: min(14rem, calc(100vw - 5.5rem));
-  }
-
-  .studio-result-grid {
-    grid-template-columns: minmax(0, var(--studio-image-slot-size));
-  }
-
-  .chat-message-actions {
-    max-width: calc(100vw - 5.5rem);
-    overflow-x: auto;
-    overflow-y: hidden;
-    padding-bottom: 1px;
+    --studio-message-width: min(100%, 38rem);
+    --studio-image-message-width: min(18rem, calc(100vw - 5.5rem));
   }
 }
 </style>

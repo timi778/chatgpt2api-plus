@@ -245,6 +245,73 @@ def _page_meta(total: int, limit: int, offset: int) -> tuple[int, int, int]:
     return page, safe_limit, page_count
 
 
+def _retention_days(value: int | float | str | None, fallback: int) -> int:
+    try:
+        return max(1, int(float(value or fallback)))
+    except (TypeError, ValueError):
+        return max(1, int(fallback))
+
+
+def _retention_cleanup_targets(retention_days: int) -> list[tuple[str, int]]:
+    days = _retention_days(retention_days, config.image_retention_days)
+    cutoff = time.time() - days * 86400
+    root = config.images_dir.resolve()
+    targets: list[tuple[str, int]] = []
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            path.relative_to(root)
+        except ValueError:
+            continue
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        if stat.st_mtime >= cutoff:
+            continue
+        targets.append((path.relative_to(root).as_posix(), stat.st_size))
+    return targets
+
+
+def preview_image_retention_cleanup(retention_days: int | None = None) -> dict[str, int | bool]:
+    days = _retention_days(retention_days, config.image_retention_days)
+    targets = _retention_cleanup_targets(days)
+    return {
+        "removed": len(targets),
+        "removed_size_bytes": sum(size for _, size in targets),
+        "retention_days": days,
+        "dry_run": True,
+    }
+
+
+def cleanup_image_retention(retention_days: int | None = None) -> dict[str, int | bool]:
+    days = _retention_days(retention_days, config.image_retention_days)
+    targets = _retention_cleanup_targets(days)
+    removed = 0
+    removed_size_bytes = 0
+    for rel, size in targets:
+        try:
+            if image_storage_service.delete(rel):
+                removed += 1
+                removed_size_bytes += size
+        except Exception:
+            continue
+        for thumbnail in (_thumbnail_path(rel), config.image_thumbnails_dir / _safe_relative_path(rel)):
+            if thumbnail.is_file():
+                thumbnail.unlink()
+        remove_tags(rel)
+    cleanup_image_thumbnails()
+    _cleanup_empty_dirs(config.images_dir)
+    _cleanup_empty_dirs(config.image_thumbnails_dir)
+    return {
+        "removed": removed,
+        "removed_size_bytes": removed_size_bytes,
+        "retention_days": days,
+        "dry_run": False,
+    }
+
+
 def list_images(
     base_url: str,
     start_date: str = "",

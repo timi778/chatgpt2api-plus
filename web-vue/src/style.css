@@ -198,3 +198,37 @@ body::-webkit-scrollbar-thumb,
   white-space: pre-line;
   line-height: 1.6;
 }
+
+input::placeholder,
+textarea::placeholder,
+input.font-mono::placeholder,
+textarea.font-mono::placeholder,
+input.ui-input-sm::placeholder,
+input.ui-input-md::placeholder,
+textarea.ui-textarea-sm::placeholder {
+  color: hsl(var(--muted-foreground) / 0.62);
+  font-family: "Noto Sans SC", "Helvetica Neue", Arial, sans-serif;
+  font-size: inherit;
+  font-weight: 400;
+  letter-spacing: 0;
+  opacity: 1;
+}
+
+.ui-select-trigger {
+  display: inline-flex;
+  width: auto;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  color: hsl(var(--foreground));
+}
+
+.ui-select-trigger:hover:not(:disabled),
+.ui-select-trigger[aria-expanded="true"] {
+  border-color: hsl(var(--primary));
+}
+
+.ui-select-trigger > svg {
+  flex: 0 0 auto;
+}

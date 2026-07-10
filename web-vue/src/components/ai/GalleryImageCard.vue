@@ -1,16 +1,17 @@
 <template>
   <article
+    v-memo="[signature]"
     class="gallery-image-card gallery-item"
     :class="{ 'is-selected': selected, 'is-expired': file.expired }"
   >
-    <div class="media-wrapper" @click="$emit('preview', file)">
+    <div class="media-wrapper" @click="handlePreview">
       <img
         v-if="previewable"
         :src="imageUrl"
         :alt="file.filename"
         loading="lazy"
         class="media-content"
-        @error="$emit('image-error', $event, file)"
+        @error="handleImageError"
       />
       <div v-else class="media-fallback">
         <Icon icon="lucide:image-off" class="h-8 w-8" />
@@ -21,23 +22,23 @@
         <Checkbox
           :model-value="selected"
           @click.stop
-          @update:model-value="(checked) => $emit('select', file, Boolean(checked))"
+          @update:model-value="handleSelect"
         />
         <span v-if="file.expired" class="media-badge danger">已过期</span>
         <span v-else class="media-badge">{{ storageLabel }}</span>
       </div>
 
       <div class="media-overlay">
-        <button class="overlay-btn" title="复制链接" @click.stop="$emit('copy', file)">
+        <button class="overlay-btn" title="复制链接" @click.stop="handleCopy">
           <Icon :icon="copied ? 'lucide:check' : 'lucide:copy'" />
         </button>
-        <button class="overlay-btn" title="编辑标签" @click.stop="$emit('edit-tags', file)">
+        <button class="overlay-btn" title="编辑标签" @click.stop="handleEditTags">
           <Icon icon="lucide:tag" />
         </button>
-        <button class="overlay-btn" title="下载" @click.stop="$emit('download', file)">
+        <button class="overlay-btn" title="下载" @click.stop="handleDownload">
           <Icon icon="lucide:download" />
         </button>
-        <button class="overlay-btn danger" title="删除" @click.stop="$emit('delete', file)">
+        <button class="overlay-btn danger" title="删除" @click.stop="handleDelete">
           <Icon icon="lucide:trash-2" />
         </button>
       </div>
@@ -61,7 +62,7 @@
           :key="`${file.path}-${tag}`"
           type="button"
           class="tag-chip"
-          @click="$emit('tag-click', tag)"
+          @click="handleTagClick(tag)"
         >
           {{ tag }}
         </button>
@@ -75,8 +76,9 @@ import { Icon } from '@iconify/vue'
 import { Checkbox, Tooltip } from 'nanocat-ui'
 import type { GalleryFile } from '@/api/gallery'
 
-defineProps<{
+const props = defineProps<{
   file: GalleryFile
+  signature: string
   selected: boolean
   previewable: boolean
   copied: boolean
@@ -87,7 +89,7 @@ defineProps<{
   timeRemaining: string
 }>()
 
-defineEmits<{
+const emit = defineEmits<{
   (e: 'preview', file: GalleryFile): void
   (e: 'select', file: GalleryFile, checked: boolean): void
   (e: 'image-error', event: Event, file: GalleryFile): void
@@ -97,6 +99,38 @@ defineEmits<{
   (e: 'delete', file: GalleryFile): void
   (e: 'tag-click', tag: string): void
 }>()
+
+function handlePreview() {
+  emit('preview', props.file)
+}
+
+function handleSelect(checked: boolean | string | number) {
+  emit('select', props.file, Boolean(checked))
+}
+
+function handleImageError(event: Event) {
+  emit('image-error', event, props.file)
+}
+
+function handleCopy() {
+  emit('copy', props.file)
+}
+
+function handleEditTags() {
+  emit('edit-tags', props.file)
+}
+
+function handleDownload() {
+  emit('download', props.file)
+}
+
+function handleDelete() {
+  emit('delete', props.file)
+}
+
+function handleTagClick(tag: string) {
+  emit('tag-click', tag)
+}
 </script>
 
 <style scoped>

@@ -576,32 +576,57 @@ class LogService:
             self.path.write_text(content, encoding="utf-8")
         return {"removed": removed}
 
-    def cleanup_old(self, retention_days: int) -> dict[str, int]:
+    def _cleanup_old(self, retention_days: int, *, dry_run: bool) -> dict[str, int | bool]:
         if not self.path.exists():
-            return {"removed": 0, "kept": 0}
+            return {"removed": 0, "kept": 0, "removed_size_bytes": 0, "dry_run": dry_run}
         try:
             days = max(1, int(retention_days))
         except (TypeError, ValueError):
             days = 30
         cutoff = time.time() - days * 86400
         with self._lock:
-            lines = self.path.read_text(encoding="utf-8").splitlines()
-            kept_lines: list[str] = []
             removed = 0
-            for line_number, raw_line in enumerate(lines):
-                item = self._parse_line(raw_line, line_number)
-                timestamp = self._timestamp(item) if item is not None else None
-                if timestamp is not None and timestamp < cutoff:
-                    removed += 1
-                    continue
-                kept_lines.append(self._serialize_item(item) if item is not None else raw_line)
-            if not removed:
-                return {"removed": 0, "kept": len(kept_lines)}
-            content = "\n".join(kept_lines)
-            if content:
-                content += "\n"
-            self.path.write_text(content, encoding="utf-8")
-        return {"removed": removed, "kept": len(kept_lines)}
+            kept = 0
+            removed_size_bytes = 0
+            temp_path = self.path.with_name(f"{self.path.name}.cleanup-{uuid4().hex}.tmp")
+            try:
+                output_file = None if dry_run else temp_path.open("w", encoding="utf-8", newline="\n")
+                try:
+                    with self.path.open("r", encoding="utf-8", errors="ignore") as input_file:
+                        for line_number, raw_line in enumerate(input_file):
+                            raw_line_clean = raw_line.rstrip("\n").rstrip("\r")
+                            item = self._parse_line(raw_line_clean, line_number)
+                            timestamp = self._timestamp(item) if item is not None else None
+                            if timestamp is not None and timestamp < cutoff:
+                                removed += 1
+                                removed_size_bytes += len(raw_line.encode("utf-8", errors="ignore"))
+                                continue
+                            kept += 1
+                            if output_file is not None:
+                                output_file.write((self._serialize_item(item) if item is not None else raw_line_clean) + "\n")
+                finally:
+                    if output_file is not None:
+                        output_file.close()
+
+                if not dry_run:
+                    if removed:
+                        temp_path.replace(self.path)
+                    elif temp_path.exists():
+                        temp_path.unlink()
+            except Exception:
+                if temp_path.exists():
+                    try:
+                        temp_path.unlink()
+                    except OSError:
+                        pass
+                raise
+        return {"removed": removed, "kept": kept, "removed_size_bytes": removed_size_bytes, "dry_run": dry_run}
+
+    def preview_cleanup_old(self, retention_days: int) -> dict[str, int | bool]:
+        return self._cleanup_old(retention_days, dry_run=True)
+
+    def cleanup_old(self, retention_days: int) -> dict[str, int | bool]:
+        return self._cleanup_old(retention_days, dry_run=False)
 
 
 log_service = LogService(DATA_DIR / "logs.jsonl")

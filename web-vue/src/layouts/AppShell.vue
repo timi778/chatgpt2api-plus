@@ -56,7 +56,7 @@
               :key="item.path"
               :to="item.path"
               class="group flex items-center overflow-hidden rounded-lg border border-transparent py-1.5 text-sm font-medium transition-colors"
-              :class="navItemClass(item.path)"
+              :class="navItemClassMap[item.path]"
               :title="isSidebarRail ? item.label : undefined"
               @mouseenter="prefetchRouteView(item.path)"
               @focus="prefetchRouteView(item.path)"
@@ -64,7 +64,7 @@
             >
               <span
                 class="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border transition-colors"
-                :class="navIconClass(item.path)"
+                :class="navIconClassMap[item.path]"
               >
                 <svg aria-hidden="true" viewBox="0 0 24 24" class="h-4 w-4" fill="currentColor">
                   <path :d="item.icon" />
@@ -86,14 +86,14 @@
                 :key="item.path"
                 :to="item.path"
                 class="group flex items-center overflow-hidden rounded-lg border border-transparent py-1.5 text-sm font-medium transition-colors"
-                :class="navItemClass(item.path)"
+                :class="navItemClassMap[item.path]"
                 :title="isSidebarRail ? item.label : undefined"
                 @mouseenter="prefetchRouteView(item.path)"
                 @focus="prefetchRouteView(item.path)"
               >
                 <span
                   class="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border transition-colors"
-                  :class="navIconClass(item.path)"
+                  :class="navIconClassMap[item.path]"
                 >
                   <svg aria-hidden="true" viewBox="0 0 24 24" class="h-4 w-4" fill="currentColor">
                     <path :d="item.icon" />
@@ -471,8 +471,20 @@
         </div>
       </div>
 
-      <div v-if="updateCheckMessage" class="mt-3 rounded-2xl border border-border bg-muted/40 px-4 py-2 text-xs text-muted-foreground">
-        {{ updateCheckMessage }}
+      <div
+        v-if="updateCheckMessage"
+        class="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-2xl border px-4 py-3 text-sm"
+        :class="updateCheckMessageClass"
+      >
+        <span class="min-w-0 flex-1 font-medium">{{ updateCheckMessage }}</span>
+        <MetaChip
+          size="xs"
+          :tone="updateCheckBadgeTone"
+          strong
+          chip-class="shrink-0"
+        >
+          {{ updateCheckBadgeText }}
+        </MetaChip>
       </div>
 
       <div class="mt-5 max-h-[56vh] space-y-5 overflow-y-auto pr-1">
@@ -590,7 +602,7 @@ const thirdPartyApps = ref<Settings['third_party_apps'] | null>(null)
 const themeMode = ref<ThemeMode>(getStoredThemeMode())
 const isRoutePending = ref(false)
 const pendingRouteTitle = ref('')
-const cachedRouteNames = ['Studio', 'Dashboard']
+const cachedRouteNames = ['Studio', 'Accounts', 'Logs', 'Monitor', 'Gallery', 'Proxy', 'Register', 'Settings']
 const cachedRouteMax = cachedRouteNames.length
 const themeOptions: { label: string; value: ThemeMode }[] = [
   { label: '浅色', value: 'light' },
@@ -721,7 +733,7 @@ const isNavActive = (path: string) => {
   return activeNavPathSet.value.has(path)
 }
 
-const navItemClass = (path: string) => {
+function buildNavItemClass(path: string) {
   const base = navItemBaseClass.value
   if (isNavActive(path)) {
     return `${base} rounded-[0.9rem] border-[hsl(var(--primary)_/_0.28)] bg-[hsl(var(--primary)_/_0.08)] font-semibold text-foreground shadow-[inset_0_0_0_1px_hsl(var(--primary)_/_0.08)]`
@@ -729,12 +741,22 @@ const navItemClass = (path: string) => {
   return `${base} rounded-[0.9rem] border-transparent text-muted-foreground hover:border-border hover:bg-[hsl(var(--secondary)_/_0.55)] hover:text-foreground`
 }
 
-const navIconClass = (path: string) => {
+function buildNavIconClass(path: string) {
   if (isNavActive(path)) {
     return 'border-[hsl(var(--primary)_/_0.28)] bg-[hsl(var(--card))] text-foreground shadow-sm'
   }
   return 'border-border bg-[hsl(var(--card))] text-muted-foreground group-hover:border-[hsl(var(--foreground)_/_0.28)] group-hover:text-foreground'
 }
+
+const navItemClassMap = computed<Record<string, string>>(() => {
+  const entries = [...visibleMenuItems.value, ...visibleUtilityMenuItems.value].map((item) => [item.path, buildNavItemClass(item.path)])
+  return Object.fromEntries(entries)
+})
+
+const navIconClassMap = computed<Record<string, string>>(() => {
+  const entries = [...visibleMenuItems.value, ...visibleUtilityMenuItems.value].map((item) => [item.path, buildNavIconClass(item.path)])
+  return Object.fromEntries(entries)
+})
 
 
 const apiBaseUrl = computed(() => {
@@ -750,6 +772,32 @@ const apiKeyDisplay = computed(() => currentAuthToken.value || '未登录')
 const currentVersionLabel = computed(() => normalizeVersionTag(currentVersionTag.value || ''))
 const latestVersionLabel = computed(() => normalizeVersionTag(latestVersionTag.value || releaseEntries.value[0]?.version || currentVersionTag.value || ''))
 const versionButtonText = computed(() => currentVersionLabel.value || '版本')
+const hasNewVersion = computed(() => isNewerVersion(latestVersionLabel.value, currentVersionLabel.value))
+const updateCheckStatus = computed(() => {
+  if (isCheckingUpdate.value) return 'checking'
+  if (!updateCheckMessage.value) return 'idle'
+  if (updateCheckMessage.value.includes('失败')) return 'error'
+  if (hasNewVersion.value || updateCheckMessage.value.includes('发现新版本')) return 'available'
+  return 'current'
+})
+const updateCheckMessageClass = computed(() => {
+  if (updateCheckStatus.value === 'available') return 'border-emerald-500/40 bg-emerald-500/10 text-emerald-700'
+  if (updateCheckStatus.value === 'checking') return 'border-cyan-500/35 bg-cyan-500/10 text-cyan-700'
+  if (updateCheckStatus.value === 'error') return 'border-amber-500/40 bg-amber-500/10 text-amber-700'
+  return 'border-border bg-muted/40 text-muted-foreground'
+})
+const updateCheckBadgeText = computed(() => {
+  if (updateCheckStatus.value === 'available') return '可更新'
+  if (updateCheckStatus.value === 'checking') return '检查中'
+  if (updateCheckStatus.value === 'error') return '检查失败'
+  return '已是最新'
+})
+const updateCheckBadgeTone = computed(() => {
+  if (updateCheckStatus.value === 'available') return 'success'
+  if (updateCheckStatus.value === 'checking') return 'info'
+  if (updateCheckStatus.value === 'error') return 'warning'
+  return 'muted'
+})
 function releaseItemTone(type: string): 'default' | 'muted' | 'success' | 'warning' | 'danger' | 'info' {
   const value = String(type || '').trim()
   if (['新增', '添加', 'Added'].includes(value)) return 'success'

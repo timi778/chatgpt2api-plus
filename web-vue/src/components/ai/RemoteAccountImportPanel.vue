@@ -91,6 +91,7 @@
         <label
           v-for="file in remoteCPAFiles"
           :key="file.name"
+          v-memo="[cpaFileRowSignature(file, selectedCPAFileNameSet.has(file.name), busy)]"
           class="selectable-list-panel-row"
         >
           <span class="min-w-0">
@@ -98,7 +99,7 @@
             <span class="block truncate text-xs text-muted-foreground">{{ file.name }}</span>
           </span>
           <Checkbox
-            :model-value="selectedCPAFileNames.includes(file.name)"
+            :model-value="selectedCPAFileNameSet.has(file.name)"
             :disabled="busy"
             @update:model-value="(checked) => toggleCPAFile(file.name, checked)"
           />
@@ -125,7 +126,7 @@
                 />
                 <span class="truncate">{{ group.name }}</span>
                 <span class="shrink-0 text-muted-foreground">
-                  {{ selectedSub2APIGroupCount(group) }}/{{ group.accounts.length }}
+                  {{ sub2APIGroupSelectedCount(group) }}/{{ group.accounts.length }}
                 </span>
               </button>
               <div class="remote-account-group__actions">
@@ -140,17 +141,18 @@
                 <Button
                   size="xs"
                   variant="outline"
-                  :disabled="busy || selectedSub2APIGroupCount(group) === 0"
+                  :disabled="busy || sub2APIGroupSelectedCount(group) === 0"
                   @click="clearSub2APIGroup(group)"
                 >
                   清空本组
                 </Button>
               </div>
             </div>
-            <div v-show="!isSub2APIGroupCollapsed(group.key)" class="remote-account-group__items">
+            <div v-if="!isSub2APIGroupCollapsed(group.key)" class="remote-account-group__items">
               <label
                 v-for="account in group.accounts"
                 :key="account.id"
+                v-memo="[sub2APIAccountRowSignature(account, selectedSub2APIAccountIdSet.has(account.id), busy)]"
                 class="selectable-list-panel-row"
               >
                 <span class="min-w-0">
@@ -160,7 +162,7 @@
                   </span>
                 </span>
                 <Checkbox
-                  :model-value="selectedSub2APIAccountIds.includes(account.id)"
+                  :model-value="selectedSub2APIAccountIdSet.has(account.id)"
                   :disabled="busy"
                   @update:model-value="(checked) => toggleSub2APIAccount(account.id, checked)"
                 />
@@ -343,6 +345,21 @@ const sub2apiAccountGroups = computed<Sub2APIAccountGroup[]>(() => {
   })
 })
 
+const selectedCPAFileNameSet = computed(() => new Set(selectedCPAFileNames.value))
+const selectedSub2APIAccountIdSet = computed(() => new Set(selectedSub2APIAccountIds.value))
+const sub2APIGroupSelectedCountMap = computed(() => {
+  const selected = selectedSub2APIAccountIdSet.value
+  const counts = new Map<string, number>()
+  for (const group of sub2apiAccountGroups.value) {
+    let count = 0
+    for (const account of group.accounts) {
+      if (selected.has(account.id)) count += 1
+    }
+    counts.set(group.key, count)
+  }
+  return counts
+})
+
 const canLoadItems = computed(() => (
   activeMode.value === 'cpa' ? Boolean(selectedCPAPoolId.value) : Boolean(selectedSub2APIServerId.value)
 ))
@@ -370,8 +387,8 @@ const allSelected = computed(() => (
   itemCount.value > 0
   && (
     activeMode.value === 'cpa'
-      ? remoteCPAFiles.value.every((file) => selectedCPAFileNames.value.includes(file.name))
-      : sub2apiAccounts.value.every((account) => selectedSub2APIAccountIds.value.includes(account.id))
+      ? remoteCPAFiles.value.every((file) => selectedCPAFileNameSet.value.has(file.name))
+      : sub2apiAccounts.value.every((account) => selectedSub2APIAccountIdSet.value.has(account.id))
   )
 ))
 
@@ -676,13 +693,43 @@ function toggleSub2APIAccount(accountId: string, checked?: boolean) {
   selectedSub2APIAccountIds.value = Array.from(next)
 }
 
-function selectedSub2APIGroupCount(group: Sub2APIAccountGroup) {
-  const selected = new Set(selectedSub2APIAccountIds.value)
-  return group.accounts.reduce((count, account) => count + (selected.has(account.id) ? 1 : 0), 0)
+function sub2APIGroupSelectedCount(group: Sub2APIAccountGroup) {
+  return sub2APIGroupSelectedCountMap.value.get(group.key) || 0
 }
 
 function isSub2APIGroupAllSelected(group: Sub2APIAccountGroup) {
-  return group.accounts.length > 0 && selectedSub2APIGroupCount(group) === group.accounts.length
+  return group.accounts.length > 0 && sub2APIGroupSelectedCount(group) === group.accounts.length
+}
+
+function cpaFileRowSignature(file: CPARemoteFile, selected: boolean, disabled: boolean) {
+  return [
+    file.name,
+    boundedSignatureText(file.email || file.name),
+    selected ? 1 : 0,
+    disabled ? 1 : 0,
+  ].map(signatureValue).join('|')
+}
+
+function sub2APIAccountRowSignature(account: Sub2APIRemoteAccount, selected: boolean, disabled: boolean) {
+  return [
+    account.id,
+    boundedSignatureText(account.email || account.name || account.id),
+    boundedSignatureText(account.plan_type, 48),
+    boundedSignatureText(account.status, 48),
+    account.has_access_token ? 1 : 0,
+    selected ? 1 : 0,
+    disabled ? 1 : 0,
+  ].map(signatureValue).join('|')
+}
+
+function signatureValue(value: unknown) {
+  return String(value ?? '').replaceAll('|', '/')
+}
+
+function boundedSignatureText(value: unknown, limit = 120) {
+  const text = signatureValue(value)
+  if (text.length <= limit) return text
+  return `${text.length}:${text.slice(0, limit)}:${text.slice(-16)}`
 }
 
 function selectSub2APIGroup(group: Sub2APIAccountGroup) {

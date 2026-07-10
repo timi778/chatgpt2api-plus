@@ -21,9 +21,14 @@ export type DebugSearchResult = {
   image_groups?: DebugSearchImageGroup[]
 }
 
+export type DebugChatContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } }
+  | { type: 'input_image'; image_url?: string; url?: string }
+
 export type DebugChatMessage = {
   role: 'system' | 'user' | 'assistant'
-  content: string
+  content: string | DebugChatContentPart[]
 }
 
 export type DebugChatCompletion = {

@@ -332,17 +332,26 @@ class RegisterService:
             self._logs.append({"time": _now(), "text": str(text), "level": str(color or "info")})
             self._logs = self._logs[-300:]
 
-    def _pool_metrics(self) -> dict:
-        items = account_service.list_accounts()
-        normal = [item for item in items if item.get("status") == "正常"]
-        return {
-            "current_quota": sum(int(item.get("quota") or 0) for item in normal if not item.get("image_quota_unknown")),
-            "current_available": len(normal),
-        }
+    def _pool_metrics(
+        self,
+        *,
+        refresh_stale: bool = False,
+        target_quota: int | None = None,
+        target_available: int | None = None,
+    ) -> dict:
+        return account_service.evaluate_account_pool(
+            refresh_stale=refresh_stale,
+            target_quota=target_quota,
+            target_available=target_available,
+        )
 
     def _target_reached(self, cfg: dict, submitted: int) -> bool:
         mode = str(cfg.get("mode") or "total")
-        metrics = self._pool_metrics()
+        metrics = self._pool_metrics(
+            refresh_stale=mode in {"quota", "available"},
+            target_quota=int(cfg.get("target_quota") or 1) if mode == "quota" else None,
+            target_available=int(cfg.get("target_available") or 1) if mode == "available" else None,
+        )
         self._bump(**metrics)
         if mode == "quota":
             reached = metrics["current_quota"] >= int(cfg.get("target_quota") or 1)

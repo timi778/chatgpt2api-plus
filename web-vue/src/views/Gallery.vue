@@ -108,17 +108,18 @@
             v-for="file in files"
             :key="file.path"
             :file="file"
+            :signature="galleryCardSignature(file)"
             :selected="isSelected(file.path)"
             :previewable="canPreviewFile(file)"
             :copied="copiedFileKey === file.path"
-            :image-url="getFileUrl(file.thumbnail_url || file.url)"
+            :image-url="galleryCardImageUrl(file)"
             :storage-label="storageLabel(file)"
             :size-label="formatSize(file.size)"
             :dimensions="formatDimensions(file)"
-            :time-remaining="file.expires_in_seconds !== null ? formatTimeRemaining(file.expires_in_seconds) : ''"
+            :time-remaining="galleryCardTimeRemaining(file)"
             @preview="openPreview"
-            @select="(item, checked) => toggleSelect(item.path, checked)"
-            @image-error="(event, item) => handleImageError(event, item.path)"
+            @select="handleCardSelect"
+            @image-error="handleCardImageError"
             @copy="copyFileLink"
             @edit-tags="openTagEditor"
             @download="downloadFile"
@@ -199,9 +200,7 @@
             <h3>存储管理</h3>
             <p>查看图片占用、磁盘剩余空间，并执行简单清理。</p>
           </div>
-          <Button size="sm" variant="ghost" icon-only aria-label="关闭存储管理" @click="closeStorageModal">
-            <Icon icon="lucide:x" class="h-4 w-4" />
-          </Button>
+          <ModalCloseButton label="关闭存储管理" @click="closeStorageModal" />
         </header>
 
         <ModalBody density="normal">
@@ -215,21 +214,9 @@
           </div>
 
           <div class="gallery-storage-grid">
-            <div class="gallery-storage-card">
-              <span>磁盘总量</span>
-              <strong>{{ storageStats ? formatMb(storageStats.disk_total_mb) : '-' }}</strong>
-            </div>
-            <div class="gallery-storage-card">
-              <span>已用空间</span>
-              <strong>{{ storageStats ? formatMb(storageStats.disk_used_mb) : '-' }}</strong>
-            </div>
-            <div class="gallery-storage-card">
-              <span>剩余空间</span>
-              <strong>{{ storageStats ? formatMb(storageStats.disk_free_mb) : '-' }}</strong>
-            </div>
-            <div class="gallery-storage-card">
-              <span>图库占用</span>
-              <strong>{{ storageStats ? formatSize(storageStats.image_size_bytes) : formatSize(totalSize) }}</strong>
+            <div v-for="item in storageCardItems" :key="item.label" class="gallery-storage-card">
+              <span>{{ item.label }}</span>
+              <strong>{{ item.value }}</strong>
             </div>
           </div>
 
@@ -244,13 +231,9 @@
           </div>
 
           <div class="gallery-storage-summary">
-            <div>
-              <span>图库文件</span>
-              <strong>{{ storageStats ? `${storageStats.image_count} 个` : `${counts.all} 个` }}</strong>
-            </div>
-            <div>
-              <span>当前筛选结果</span>
-              <strong>{{ totalItems }} 个 / {{ formatSize(totalSize) }}</strong>
+            <div v-for="item in storageSummaryItems" :key="item.label">
+              <span>{{ item.label }}</span>
+              <strong>{{ item.value }}</strong>
             </div>
           </div>
 
@@ -297,10 +280,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, ref } from 'vue'
 import { Icon } from '@iconify/vue'
 import {
-  galleryApi,
   resolveGalleryFileUrl,
   type GalleryFile,
   type ImageStorageStats,
@@ -313,6 +295,7 @@ import GalleryImageCard from '@/components/ai/GalleryImageCard.vue'
 import ListPagination from '@/components/ai/ListPagination.vue'
 import MetricStrip from '@/components/ai/MetricStrip.vue'
 import ModalBody from '@/components/ai/ModalBody.vue'
+import ModalCloseButton from '@/components/ai/ModalCloseButton.vue'
 import ModalFooter from '@/components/ai/ModalFooter.vue'
 import ModalShell from '@/components/ai/ModalShell.vue'
 import PageLoadingState from '@/components/ai/PageLoadingState.vue'
@@ -323,8 +306,25 @@ import StateBlock from '@/components/ai/StateBlock.vue'
 import GroupedSelectMenu from '@/components/ui/GroupedSelectMenu.vue'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import { useToast } from '@/composables/useToast'
-import { downloadUrlAsFile, saveBlob } from '@/lib/downloads'
-import { getNumberPreference, preferenceKeys, setNumberPreference } from '@/lib/preferences'
+import { usePageRuntime } from '@/composables/usePageRuntime'
+import { useGalleryFileActions } from '@/composables/useGalleryFileActions'
+import { useGalleryInteractionRuntime } from '@/views/gallery/galleryInteractionRuntime'
+import { useGalleryOperationsRuntime } from '@/views/gallery/galleryOperationsRuntime'
+import { useGalleryQueryRuntime } from '@/views/gallery/galleryQueryRuntime'
+import {
+  buildStorageCardItems,
+  buildStorageSummaryItems,
+  formatDimensions,
+  formatSize,
+  formatStorageUsagePercent,
+  formatTimeRemaining,
+  galleryFileCardSignature,
+  galleryPageSizeOptions,
+  storageUsageBarWidth as getStorageUsageBarWidth,
+  storageLabel,
+} from '@/views/gallery/galleryView'
+
+defineOptions({ name: 'Gallery' })
 
 const GalleryLightbox = defineAsyncComponent(() => import('@/components/ai/GalleryLightbox.vue'))
 const GalleryTagEditorModal = defineAsyncComponent(() => import('@/components/ai/GalleryTagEditorModal.vue'))
@@ -333,587 +333,182 @@ const OperationProgressModal = defineAsyncComponent(() => import('@/components/a
 const toast = useToast()
 const confirmDialog = useConfirmDialog()
 
-const files = ref<GalleryFile[]>([])
-const totalSize = ref(0)
-const totalItems = ref(0)
-const isLoading = ref(true)
-const hasLoadedOnce = ref(false)
-const galleryLoadError = ref('')
-const batchBusy = ref(false)
-const isTagSaving = ref(false)
-const previewFile = ref<GalleryFile | null>(null)
-const tagEditorFile = ref<GalleryFile | null>(null)
-const tagDraft = ref('')
-const copiedFileKey = ref('')
-const tagFilter = ref('all')
-const searchQuery = ref('')
-const startDate = ref('')
-const endDate = ref('')
-const galleryPageSizeOptions = [24, 48, 96] as const
-const pageSize = ref(getNumberPreference(preferenceKeys.galleryPageSize, 24, { allowed: galleryPageSizeOptions }))
-const currentPage = ref(1)
-const pageCount = ref(1)
-const counts = ref({ all: 0, image: 0, video: 0, music: 0 })
-const allTags = ref<string[]>([])
-const selectedPaths = ref<Set<string>>(new Set())
-const brokenImagePaths = ref<Set<string>>(new Set())
 const storageStats = ref<ImageStorageStats | null>(null)
-const isStorageModalOpen = ref(false)
-const isStorageBusy = ref(false)
-const storageActionMessage = ref('')
-const storageActionError = ref('')
-const targetFreeMb = ref('500')
-const operationProgress = reactive({
-  open: false,
-  title: '',
-  subtitle: '',
-  total: 0,
-  current: 0,
-  statusLabel: '已处理',
-  message: '',
-  error: '',
-  busy: false,
-})
 
-const tagOptions = computed(() => [
-  { label: '全部标签', value: 'all' },
-  ...allTags.value.map((tag) => ({ label: tag, value: tag })),
-])
-
-const paginationSummary = computed(() => `第 ${currentPage.value} / ${pageCount.value} 页，共 ${totalItems.value} 张`)
-const selectedCount = computed(() => selectedPaths.value.size)
-const allVisibleSelected = computed(() => files.value.length > 0 && files.value.every((file) => selectedPaths.value.has(file.path)))
-const draftTags = computed(() => parseTags(tagDraft.value))
-const storageUsagePercent = computed(() => {
-  const stats = storageStats.value
-  if (!stats || stats.disk_total_mb <= 0) return '-'
-  const percent = Math.min(100, Math.max(0, (stats.disk_used_mb / stats.disk_total_mb) * 100))
-  return `${percent.toFixed(1)}%`
+const pageRuntime = usePageRuntime('gallery')
+const galleryQueryRuntime = useGalleryQueryRuntime({
+  runtime: pageRuntime,
+  toast,
+  storageStats,
+  onApplied: handleGalleryApplied,
 })
-const storageUsageBarWidth = computed(() => (storageUsagePercent.value === '-' ? '0%' : storageUsagePercent.value))
-let latestLoadToken = 0
-let copyResetTimer: number | null = null
-let searchTimer: number | null = null
+const files = galleryQueryRuntime.files
+const totalSize = galleryQueryRuntime.totalSize
+const isLoading = galleryQueryRuntime.isLoading
+const hasLoadedOnce = galleryQueryRuntime.hasLoadedOnce
+const galleryLoadError = galleryQueryRuntime.galleryLoadError
+const tagFilter = galleryQueryRuntime.tagFilter
+const searchQuery = galleryQueryRuntime.searchQuery
+const startDate = galleryQueryRuntime.startDate
+const endDate = galleryQueryRuntime.endDate
+const pageSize = galleryQueryRuntime.pageSize
+const counts = galleryQueryRuntime.counts
+const allTags = galleryQueryRuntime.allTags
+const tagOptions = galleryQueryRuntime.tagOptions
+const currentPage = galleryQueryRuntime.currentPage
+const totalItems = galleryQueryRuntime.totalItems
+const paginationSummary = galleryQueryRuntime.paginationSummary
+const galleryMetricItems = galleryQueryRuntime.galleryMetricItems
+const loadGallery = galleryQueryRuntime.loadGallery
+const refreshAll = galleryQueryRuntime.refreshAll
+const resetAndLoad = galleryQueryRuntime.resetAndLoad
+const storageUsagePercent = computed(() => formatStorageUsagePercent(storageStats.value))
+const storageUsageBarWidth = computed(() => getStorageUsageBarWidth(storageUsagePercent.value))
+const storageCardItems = computed(() => buildStorageCardItems(storageStats.value, totalSize.value))
+const storageSummaryItems = computed(() => buildStorageSummaryItems(storageStats.value, counts.value, totalItems.value, totalSize.value))
+const fileActions = useGalleryFileActions({
+  resolveUrl: getFileUrl,
+})
+const copiedFileKey = fileActions.copiedFileKey
+const galleryInteractions = useGalleryInteractionRuntime({
+  toast,
+  files,
+  allTags,
+  tagFilter,
+  loadGallery,
+  resetAndLoad,
+})
+const isTagSaving = galleryInteractions.isTagSaving
+const previewFile = galleryInteractions.previewFile
+const tagEditorFile = galleryInteractions.tagEditorFile
+const tagDraft = galleryInteractions.tagDraft
+const selectedPaths = galleryInteractions.selectedPaths
+const selectedCount = galleryInteractions.selectedCount
+const allVisibleSelected = galleryInteractions.allVisibleSelected
+const draftTags = galleryInteractions.draftTags
+const openPreview = galleryInteractions.openPreview
+const closePreview = galleryInteractions.closePreview
+const closePreviewIfPath = galleryInteractions.closePreviewIfPath
+const openTagEditor = galleryInteractions.openTagEditor
+const closeTagEditor = galleryInteractions.closeTagEditor
+const closeTagEditorIfPath = galleryInteractions.closeTagEditorIfPath
+const saveTagEditor = galleryInteractions.saveTagEditor
+const toggleDraftTag = galleryInteractions.toggleDraftTag
+const setTagFilter = galleryInteractions.setTagFilter
+const toggleSelect = galleryInteractions.toggleSelect
+const toggleSelectAllVisible = galleryInteractions.toggleSelectAllVisible
+const isSelected = galleryInteractions.isSelected
+const clearSelection = galleryInteractions.clearSelection
+const pruneSelection = galleryInteractions.pruneSelection
+const canPreviewFile = galleryInteractions.canPreviewFile
+const handleImageError = galleryInteractions.handleImageError
+const clearBrokenImages = galleryInteractions.clearBrokenImages
+const galleryOperations = useGalleryOperationsRuntime({
+  runtime: pageRuntime,
+  confirmDialog,
+  toast,
+  files,
+  currentPage,
+  storageStats,
+  selectedPaths,
+  loadGallery,
+  closePreviewIfPath,
+  closeTagEditorIfPath,
+  clearSelection,
+})
+const {
+  batchBusy,
+  isStorageModalOpen,
+  isStorageBusy,
+  storageActionMessage,
+  storageActionError,
+  targetFreeMb,
+  operationProgress,
+  refreshStorageStats,
+  openStorageModal,
+  closeStorageModal,
+  handleCompressStorage,
+  handleCleanupExpired,
+  handleCleanupToTarget,
+  handleDelete,
+  handleDeleteSelected,
+  handleBatchDownload,
+} = galleryOperations
 
 function getFileUrl(url: string) {
   return resolveGalleryFileUrl(url)
 }
 
-async function loadGallery() {
-  const loadToken = ++latestLoadToken
-  isLoading.value = true
-  galleryLoadError.value = ''
-  try {
-    const [data, tags] = await Promise.all([
-      galleryApi.getFiles({
-        page: Number(pageSize.value) ? currentPage.value : 1,
-        page_size: Number(pageSize.value),
-        media_type: 'all',
-        tag: tagFilter.value,
-        search: searchQuery.value,
-        start_date: startDate.value,
-        end_date: endDate.value,
-      }),
-      galleryApi.getTags().catch(() => allTags.value),
-    ])
-    if (loadToken !== latestLoadToken) return
-    files.value = data.files
-    totalSize.value = data.total_size
-    totalItems.value = data.total
-    counts.value = data.counts
-    currentPage.value = data.page
-    pageCount.value = Math.max(1, data.page_count)
-    allTags.value = tags || []
-    brokenImagePaths.value = new Set()
-    pruneSelection()
-    void galleryApi.getStorage()
-      .then((storage) => {
-        if (loadToken === latestLoadToken) storageStats.value = storage || null
-      })
-      .catch(() => undefined)
-  } catch (error: any) {
-    if (loadToken !== latestLoadToken) return
-    galleryLoadError.value = error?.message || '加载图片管理失败'
-    toast.error(galleryLoadError.value, '加载失败')
-  } finally {
-    if (loadToken === latestLoadToken) {
-      isLoading.value = false
-      hasLoadedOnce.value = true
-    }
-  }
+function galleryCardImageUrl(file: GalleryFile) {
+  return getFileUrl(file.thumbnail_url || file.url)
 }
 
-async function refreshAll() {
-  await loadGallery()
+function galleryCardTimeRemaining(file: GalleryFile) {
+  return file.expires_in_seconds !== null ? formatTimeRemaining(file.expires_in_seconds) : ''
 }
 
-async function refreshStorageStats(options: { lock?: boolean } = {}) {
-  const shouldLock = options.lock !== false
-  if (shouldLock) isStorageBusy.value = true
-  storageActionError.value = ''
-  try {
-    storageStats.value = await galleryApi.getStorage()
-  } catch (error: any) {
-    storageActionError.value = error?.message || '刷新存储统计失败'
-    toast.error(storageActionError.value, '刷新失败')
-  } finally {
-    if (shouldLock) isStorageBusy.value = false
-  }
-}
-
-function openStorageModal() {
-  isStorageModalOpen.value = true
-  storageActionMessage.value = ''
-  storageActionError.value = ''
-  void refreshStorageStats()
-}
-
-function closeStorageModal() {
-  if (isStorageBusy.value) return
-  isStorageModalOpen.value = false
-}
-
-async function handleCompressStorage() {
-  const confirmed = await confirmDialog.ask({
-    title: '压缩图片',
-    message: '将尝试压缩本地图片以释放空间。该操作可能需要一点时间，确定继续吗？',
-    confirmText: '开始压缩',
-    cancelText: '取消',
+function galleryCardSignature(file: GalleryFile) {
+  return galleryFileCardSignature(file, {
+    selected: isSelected(file.path),
+    previewable: canPreviewFile(file),
+    copied: copiedFileKey.value === file.path,
+    imageUrl: galleryCardImageUrl(file),
+    storageLabel: storageLabel(file),
+    sizeLabel: formatSize(file.size),
+    dimensions: formatDimensions(file),
+    timeRemaining: galleryCardTimeRemaining(file),
   })
-  if (!confirmed) return
+}
 
-  isStorageBusy.value = true
-  storageActionMessage.value = '正在压缩图片...'
-  storageActionError.value = ''
-  try {
-    const result = await galleryApi.compressStorage()
-    storageActionMessage.value = `压缩完成：处理 ${Number(result.compressed || 0)} 张，节省 ${formatSize(Number(result.saved_bytes || 0))}。`
-    toast.success(storageActionMessage.value, '压缩完成')
-    await Promise.all([refreshStorageStats({ lock: false }), loadGallery()])
-  } catch (error: any) {
-    storageActionError.value = error?.message || '压缩图片失败'
-    toast.error(storageActionError.value, '压缩失败')
-  } finally {
-    isStorageBusy.value = false
+function handleCardSelect(file: GalleryFile, checked: boolean) {
+  toggleSelect(file.path, checked)
+}
+
+function handleCardImageError(event: Event, file: GalleryFile) {
+  handleImageError(event, file.path)
+}
+
+function handleGalleryApplied() {
+  clearBrokenImages()
+  pruneSelection()
+  void refreshStorageStats({ lock: false, silent: true })
+}
+
+const downloadFile = fileActions.downloadFile
+const copyFileLink = fileActions.copyFileLink
+
+function clearGalleryTimers() {
+  fileActions.clearCopyState()
+  galleryQueryRuntime.clearTimers()
+}
+
+function activateGalleryView(refresh = false) {
+  if (refresh) {
+    void loadGallery()
   }
 }
 
-async function handleCleanupExpired() {
-  const confirmed = await confirmDialog.ask({
-    title: '清理过期图片',
-    message: '将删除图库中已过期的图片记录和文件。此操作不可恢复，确定继续吗？',
-    confirmText: '清理过期',
-    cancelText: '取消',
-  })
-  if (!confirmed) return
-
-  isStorageBusy.value = true
-  storageActionMessage.value = '正在清理过期图片...'
-  storageActionError.value = ''
-  try {
-    const result = await galleryApi.cleanupExpired()
-    storageActionMessage.value = result.message || `已清理 ${Number(result.deleted || 0)} 张过期图片。`
-    toast.success(storageActionMessage.value, '清理完成')
-    await Promise.all([refreshStorageStats({ lock: false }), loadGallery()])
-  } catch (error: any) {
-    storageActionError.value = error?.message || '清理过期图片失败'
-    toast.error(storageActionError.value, '清理失败')
-  } finally {
-    isStorageBusy.value = false
-  }
+function deactivateGalleryView() {
+  galleryQueryRuntime.invalidate()
+  galleryOperations.deactivate()
+  clearGalleryTimers()
 }
 
-async function handleCleanupToTarget(dryRun: boolean) {
-  const target = Number(targetFreeMb.value)
-  if (!Number.isFinite(target) || target < 1) {
-    storageActionError.value = '请输入有效的目标剩余空间。'
-    toast.error(storageActionError.value, '参数错误')
-    return
-  }
-
-  const normalizedTarget = Math.floor(target)
-  if (!dryRun) {
-    const confirmed = await confirmDialog.ask({
-      title: '清理到目标空间',
-      message: `将从旧图片开始清理，直到磁盘剩余空间尽量达到 ${formatMb(normalizedTarget)}。此操作不可恢复，确定继续吗？`,
-      confirmText: '开始清理',
-      cancelText: '取消',
-    })
-    if (!confirmed) return
-  }
-
-  isStorageBusy.value = true
-  storageActionMessage.value = dryRun ? '正在预估可清理图片...' : '正在清理到目标剩余空间...'
-  storageActionError.value = ''
-  try {
-    const result = await galleryApi.cleanupToTarget(normalizedTarget, dryRun)
-    const removed = Number(result.removed || 0)
-    const freedLabel = formatMb(Number(result.freed_mb || 0))
-    const currentLabel = formatMb(Number(result.current_free_mb || 0))
-    const targetLabel = formatMb(Number(result.target_free_mb || normalizedTarget))
-    if (dryRun) {
-      storageActionMessage.value = removed > 0
-        ? `预估会清理 ${removed} 张，预计释放 ${freedLabel}。当前剩余 ${currentLabel} / 目标 ${targetLabel}。`
-        : `无需清理：当前剩余 ${currentLabel}，已达到目标 ${targetLabel}。`
-      toast.success(storageActionMessage.value, '预估完成')
-      await refreshStorageStats({ lock: false })
-    } else {
-      storageActionMessage.value = removed > 0
-        ? `已清理 ${removed} 张，释放 ${freedLabel}。当前剩余 ${currentLabel} / 目标 ${targetLabel}。`
-        : `没有需要清理的图片。当前剩余 ${currentLabel} / 目标 ${targetLabel}。`
-      toast.success(storageActionMessage.value, '清理完成')
-      await Promise.all([refreshStorageStats({ lock: false }), loadGallery()])
-    }
-  } catch (error: any) {
-    storageActionError.value = error?.message || '按目标剩余空间清理失败'
-    toast.error(storageActionError.value, '清理失败')
-  } finally {
-    isStorageBusy.value = false
-  }
-}
-
-function resetAndLoad() {
-  if (currentPage.value !== 1) {
-    currentPage.value = 1
-    return
-  }
-  void loadGallery()
-}
-
-async function handleDelete(file: GalleryFile) {
-  const confirmed = await confirmDialog.ask({
-    title: '确认删除',
-    message: `确定要删除 ${file.filename} 吗？此操作不可恢复。`,
-    confirmText: '删除',
-    cancelText: '取消',
-  })
-  if (!confirmed) return
-
-  batchBusy.value = true
-  operationProgress.open = true
-  operationProgress.title = '删除图片'
-  operationProgress.subtitle = file.filename
-  operationProgress.total = 1
-  operationProgress.current = 0
-  operationProgress.statusLabel = '已提交'
-  operationProgress.message = '正在提交删除请求...'
-  operationProgress.error = ''
-  operationProgress.busy = true
-  try {
-    await galleryApi.deleteFile(file.path)
-    operationProgress.current = 1
-    operationProgress.statusLabel = '已处理'
-    operationProgress.message = '删除完成，正在刷新列表...'
-    selectedPaths.value.delete(file.path)
-    selectedPaths.value = new Set(selectedPaths.value)
-    if (previewFile.value?.path === file.path) closePreview()
-    if (tagEditorFile.value?.path === file.path) closeTagEditor()
-    if (files.value.length === 1 && currentPage.value > 1) {
-      currentPage.value -= 1
-    } else {
-      await loadGallery()
-    }
-    toast.success(`已删除 ${file.filename}`, '删除成功')
-    operationProgress.message = '图片已删除'
-  } catch (error: any) {
-    operationProgress.error = error?.message || '删除图片失败'
-    toast.error(operationProgress.error, '删除失败')
-  } finally {
-    batchBusy.value = false
-    operationProgress.busy = false
-  }
-}
-
-async function handleDeleteSelected() {
-  const paths = Array.from(selectedPaths.value)
-  if (!paths.length) return
-  const confirmed = await confirmDialog.ask({
-    title: '批量删除',
-    message: `确定要删除已选择的 ${paths.length} 张图片吗？此操作不可恢复。`,
-    confirmText: '删除',
-    cancelText: '取消',
-  })
-  if (!confirmed) return
-
-  batchBusy.value = true
-  operationProgress.open = true
-  operationProgress.title = '批量删除图片'
-  operationProgress.subtitle = `已选择 ${paths.length} 张`
-  operationProgress.total = paths.length
-  operationProgress.current = 0
-  operationProgress.statusLabel = '已提交'
-  operationProgress.message = '正在提交批量删除请求...'
-  operationProgress.error = ''
-  operationProgress.busy = true
-  try {
-    const result = await galleryApi.deleteFiles(paths)
-    operationProgress.current = Number(result.removed || 0)
-    operationProgress.statusLabel = '已处理'
-    operationProgress.message = '删除完成，正在刷新列表...'
-    clearSelection()
-    await loadGallery()
-    toast.success(`已删除 ${Number(result.removed || 0)} 张图片。`, '删除成功')
-    operationProgress.message = `已删除 ${Number(result.removed || 0)} 张图片`
-  } catch (error: any) {
-    operationProgress.error = error?.message || '批量删除失败'
-    toast.error(operationProgress.error, '删除失败')
-  } finally {
-    batchBusy.value = false
-    operationProgress.busy = false
-  }
-}
-
-async function handleBatchDownload() {
-  const paths = Array.from(selectedPaths.value)
-  if (!paths.length) return
-  batchBusy.value = true
-  operationProgress.open = true
-  operationProgress.title = '批量下载图片'
-  operationProgress.subtitle = `已选择 ${paths.length} 张`
-  operationProgress.total = paths.length
-  operationProgress.current = 0
-  operationProgress.statusLabel = '已提交'
-  operationProgress.message = '正在打包 ZIP...'
-  operationProgress.error = ''
-  operationProgress.busy = true
-  try {
-    const blob = await galleryApi.downloadZip(paths)
-    operationProgress.current = paths.length
-    operationProgress.statusLabel = '已处理'
-    operationProgress.message = 'ZIP 已生成，正在启动下载...'
-    saveBlob(blob, `images_${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.zip`)
-    toast.success(`已打包 ${paths.length} 张图片。`, '下载已开始')
-    operationProgress.message = `已打包 ${paths.length} 张图片`
-  } catch (error: any) {
-    operationProgress.error = error?.message || '批量下载失败'
-    toast.error(operationProgress.error, '下载失败')
-  } finally {
-    batchBusy.value = false
-    operationProgress.busy = false
-  }
-}
-
-async function downloadFile(file: GalleryFile) {
-  try {
-    await downloadUrlAsFile(getFileUrl(file.url), file.filename, { localPath: file.path })
-    toast.success(`已开始下载 ${file.filename}`)
-  } catch (error: any) {
-    toast.error(error?.message || '无法读取图片文件', '下载失败')
-  }
-}
-
-async function copyFileLink(file: GalleryFile | null) {
-  if (!file) return
-  const url = getFileUrl(file.url)
-  try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(url)
-    } else {
-      const input = document.createElement('input')
-      input.value = url
-      document.body.appendChild(input)
-      input.select()
-      document.execCommand('copy')
-      document.body.removeChild(input)
-    }
-    copiedFileKey.value = file.path
-    if (copyResetTimer !== null) {
-      window.clearTimeout(copyResetTimer)
-    }
-    copyResetTimer = window.setTimeout(() => {
-      copiedFileKey.value = ''
-      copyResetTimer = null
-    }, 1800)
-    toast.success('图片链接已复制。', '复制成功')
-  } catch {
-    copiedFileKey.value = ''
-    toast.error('复制链接失败。', '复制失败')
-  }
-}
-
-function openPreview(file: GalleryFile) {
-  previewFile.value = file
-}
-
-function closePreview() {
-  previewFile.value = null
-}
-
-function openTagEditor(file: GalleryFile) {
-  tagEditorFile.value = file
-  tagDraft.value = file.tags.join(', ')
-}
-
-function closeTagEditor() {
-  if (isTagSaving.value) return
-  tagEditorFile.value = null
-  tagDraft.value = ''
-}
-
-async function saveTagEditor() {
-  const file = tagEditorFile.value
-  if (!file) return
-  const tags = draftTags.value
-  isTagSaving.value = true
-  try {
-    const result = await galleryApi.updateTags(file.path, tags)
-    applyFileTags(file.path, result.tags || tags)
-    allTags.value = await galleryApi.getTags()
-    if (tagFilter.value !== 'all' && !(result.tags || tags).includes(tagFilter.value)) {
-      await loadGallery()
-    }
-    toast.success('标签已保存。', '保存成功')
-    closeTagEditor()
-  } catch (error: any) {
-    toast.error(error?.message || '保存标签失败', '保存失败')
-  } finally {
-    isTagSaving.value = false
-  }
-}
-
-function applyFileTags(path: string, tags: string[]) {
-  files.value = files.value.map((file) => (file.path === path ? { ...file, tags } : file))
-  if (previewFile.value?.path === path) previewFile.value = { ...previewFile.value, tags }
-  if (tagEditorFile.value?.path === path) tagEditorFile.value = { ...tagEditorFile.value, tags }
-}
-
-function parseTags(value: string) {
-  return Array.from(new Set(value.split(/[,\s，、]+/).map((tag) => tag.trim()).filter(Boolean)))
-}
-
-function toggleDraftTag(tag: string) {
-  const next = new Set(draftTags.value)
-  if (next.has(tag)) {
-    next.delete(tag)
-  } else {
-    next.add(tag)
-  }
-  tagDraft.value = Array.from(next).join(', ')
-}
-
-function setTagFilter(tag: string) {
-  tagFilter.value = tag
-  resetAndLoad()
-}
-
-function toggleSelect(path: string, checked?: boolean) {
-  const next = new Set(selectedPaths.value)
-  const shouldSelect = typeof checked === 'boolean' ? checked : !next.has(path)
-  if (shouldSelect) {
-    next.add(path)
-  } else {
-    next.delete(path)
-  }
-  selectedPaths.value = next
-}
-
-function toggleSelectAllVisible(checked?: boolean) {
-  const next = new Set(selectedPaths.value)
-  const shouldSelect = typeof checked === 'boolean' ? checked : !allVisibleSelected.value
-  for (const file of files.value) {
-    if (shouldSelect) next.add(file.path)
-    else next.delete(file.path)
-  }
-  selectedPaths.value = next
-}
-
-function isSelected(path: string) {
-  return selectedPaths.value.has(path)
-}
-
-function clearSelection() {
-  selectedPaths.value = new Set()
-}
-
-function pruneSelection() {
-  if (selectedPaths.value.size === 0) return
-  const loadedPaths = new Set(files.value.map((file) => file.path))
-  const next = new Set(Array.from(selectedPaths.value).filter((path) => loadedPaths.has(path)))
-  selectedPaths.value = next
-}
-
-function formatSize(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
-}
-
-function formatMb(value: number): string {
-  return formatSize(Number(value || 0) * 1024 * 1024)
-}
-
-function formatTimeRemaining(seconds: number): string {
-  if (seconds <= 0) return '已过期'
-  const d = Math.floor(seconds / 86400)
-  const h = Math.floor((seconds % 86400) / 3600)
-  const m = Math.floor((seconds % 3600) / 60)
-  if (d > 0) return `${d}天 ${h}小时`
-  return h > 0 ? `${h}h ${m}m` : `${m}m`
-}
-
-function formatDimensions(file: GalleryFile): string {
-  return file.width && file.height ? `${file.width}x${file.height}` : ''
-}
-
-function storageLabel(file: GalleryFile): string {
-  if (file.storage === 'both') return '本地+云'
-  if (file.storage === 'webdav') return '云端'
-  return '本地'
-}
-
-function canPreviewFile(file: GalleryFile): boolean {
-  return file.size > 128 && !brokenImagePaths.value.has(file.path)
-}
-
-function handleImageError(event: Event, path: string) {
-  const img = event.target as HTMLImageElement
-  img.style.opacity = '0'
-  brokenImagePaths.value = new Set([...brokenImagePaths.value, path])
-}
-
-watch([tagFilter, startDate, endDate, pageSize], () => {
-  resetAndLoad()
-})
-const galleryMetricItems = computed(() => [
-  { label: '当前视图', value: totalItems.value, icon: 'lucide:image', iconClass: 'text-cyan-600', iconBgClass: 'bg-transparent' },
-  { label: '图库总量', value: storageStats.value ? storageStats.value.image_count : counts.value.all, icon: 'lucide:archive', iconClass: 'text-violet-600', iconBgClass: 'bg-transparent' },
-  { label: '当前占用', value: formatSize(totalSize.value), icon: 'lucide:database', iconClass: 'text-emerald-600', iconBgClass: 'bg-transparent' },
-  { label: '磁盘剩余', value: storageStats.value ? formatSize(storageStats.value.disk_free_mb * 1024 * 1024) : '-', icon: 'lucide:hard-drive', iconClass: 'text-amber-600', iconBgClass: 'bg-transparent' },
-])
-
-watch(pageSize, (value) => {
-  setNumberPreference(preferenceKeys.galleryPageSize, value)
+pageRuntime.onActivate(({ initial }) => {
+  activateGalleryView(!initial)
+  if (initial) void loadGallery()
 })
 
-watch(searchQuery, () => {
-  if (searchTimer !== null) {
-    window.clearTimeout(searchTimer)
-  }
-  searchTimer = window.setTimeout(() => {
-    searchTimer = null
-    resetAndLoad()
-  }, 250)
+pageRuntime.onDeactivate(() => {
+  deactivateGalleryView()
 })
 
-watch(currentPage, () => {
-  void loadGallery()
+pageRuntime.onHide(() => {
+  deactivateGalleryView()
 })
 
-onMounted(() => {
-  void loadGallery()
-})
-
-onBeforeUnmount(() => {
-  if (copyResetTimer !== null) {
-    window.clearTimeout(copyResetTimer)
-    copyResetTimer = null
-  }
-  if (searchTimer !== null) {
-    window.clearTimeout(searchTimer)
-    searchTimer = null
-  }
+pageRuntime.onShow(() => {
+  activateGalleryView(true)
 })
 </script>
 

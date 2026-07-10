@@ -182,7 +182,7 @@ const operationSections = [
   {
     title: '账号来源',
     items: [
-      '支持 Access Token、Session JSON、CPA JSON 文件、远程 CPA 服务器和 Sub2API 服务器导入。',
+      '支持 OAuth 登录已有账号、Access Token、Session JSON、CPA JSON 文件、远程 CPA 服务器和 Sub2API 服务器导入。',
       '远程 CPA 和 Sub2API 来源只在设置页配置连接，真正导入动作在账号管理页执行。',
       '批量刷新和导出账号都会先确认范围，避免误操作真实账号池。',
     ],
