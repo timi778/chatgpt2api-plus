@@ -119,18 +119,6 @@
         />
       </FormField>
 
-      <FormField label="超时继续等待">
-        <template #label-extra>
-          <HelpTip text="单位秒，图片超时后继续等待的额外时间。" />
-        </template>
-        <Input
-          :model-value="imageTimeoutRetryField.input.value"
-          type="number"
-          block
-          placeholder="30"
-          @update:model-value="imageTimeoutRetryField.update"
-        />
-      </FormField>
     </div>
   </FormSection>
 </template>
@@ -149,7 +137,6 @@ defineProps<{
   imagePollTimeoutField: NumberSettingField
   imageStreamTimeoutField: NumberSettingField
   imageAccountConcurrencyField: NumberSettingField
-  imageTimeoutRetryField: NumberSettingField
   proxyBusy: string
   proxyTestResult: ProxyTestResult | null
 }>()

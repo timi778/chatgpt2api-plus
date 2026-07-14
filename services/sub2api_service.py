@@ -383,7 +383,7 @@ def _account_email(account: dict, credentials: dict, extra: dict) -> str:
 
 def _account_plan_type(account: dict, credentials: dict, extra: dict) -> str:
     for source in (credentials, extra, account):
-        for key in ("plan_type", "planType", "subscription_tier", "subscriptionTier", "entitlement_status"):
+        for key in ("plan_type", "planType", "subscription_tier", "subscriptionTier"):
             value = _clean(source.get(key))
             if value:
                 return value

@@ -25,6 +25,7 @@ EXCEPTION_DIAGNOSTIC_ATTRS: tuple[tuple[str, str], ...] = (
     ("stream_timeout_followup", "stream_timeout_followup"),
     ("last_task_error", "last_task_error"),
     ("last_conversation_snapshot", "last_conversation_snapshot"),
+    ("image_attempts", "image_attempts"),
 )
 
 

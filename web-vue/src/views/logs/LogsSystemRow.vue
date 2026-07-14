@@ -24,10 +24,18 @@
       </p>
     </td>
     <td class="py-4 pr-5 align-middle text-xs text-muted-foreground">
-      {{ formatDuration(item.durationMs) || '-' }}
+      <div :title="[durationDisplay.total, durationDisplay.breakdown].filter(Boolean).join(' ')">
+        <p class="whitespace-nowrap">{{ durationDisplay.total || '-' }}</p>
+        <p
+          v-if="durationDisplay.breakdown"
+          class="mt-0.5 max-w-[14rem] truncate whitespace-nowrap text-[10px] text-muted-foreground/75"
+        >
+          {{ durationDisplay.breakdown }}
+        </p>
+      </div>
     </td>
     <td class="py-4 pr-5 align-middle">
-      <StateBadge :tone="statusTone(item)" shape="rounded" :bordered="false">
+      <StateBadge :tone="statusTone(item)" shape="rounded">
         {{ statusLabel(item) }}
       </StateBadge>
     </td>
@@ -41,13 +49,23 @@
       />
     </td>
     <td class="py-4 pr-5 align-middle">
-      <p
-        class="max-w-[28rem] truncate text-xs text-foreground"
-        :class="{ 'text-rose-600': failed }"
-        :title="summary"
-      >
-        {{ summary || '-' }}
-      </p>
+      <div class="flex min-w-0 items-center gap-2">
+        <p
+          class="min-w-0 max-w-[28rem] flex-1 truncate text-xs text-foreground"
+          :class="{ 'text-rose-600': failed }"
+          :title="summary"
+        >
+          {{ summary || '-' }}
+        </p>
+        <MetaChip
+          v-if="item.accountSwitchCount"
+          size="xs"
+          tone="warning"
+          chip-class="shrink-0"
+        >
+          切换 {{ item.accountSwitchCount }} 次
+        </MetaChip>
+      </div>
     </td>
     <td class="py-4 pr-4 text-right align-middle">
       <div class="flex justify-end gap-1.5">
@@ -74,11 +92,11 @@ import LogImagePreviewCell from '@/components/ai/LogImagePreviewCell.vue'
 import MetaChip from '@/components/ai/MetaChip.vue'
 import StateBadge from '@/components/ai/StateBadge.vue'
 import {
-  formatLogDuration as formatDuration,
   isSystemLogFailed as isFailed,
   type SystemLogRow,
 } from '@/api/logs'
 import {
+  logDurationDisplay,
   statusLabel,
   statusTone,
   summaryText,
@@ -103,6 +121,7 @@ const emit = defineEmits<{
 const token = computed(() => tokenLabel(props.item))
 const summary = computed(() => summaryText(props.item))
 const failed = computed(() => isFailed(props.item))
+const durationDisplay = computed(() => logDurationDisplay(props.item))
 
 function handleSelect(checked: boolean | string | number) {
   emit('toggle-selection', props.item.id, Boolean(checked))

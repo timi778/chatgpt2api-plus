@@ -77,7 +77,7 @@ function cleanupDoneMessage(result: RetentionCleanupResult): string {
 function accountCleanupMessage(result: AccountCleanupResult): string {
   return [
     `按当前账号策略检测到 ${result.total_removed} 个可移除账号。`,
-    `异常账号：${result.invalid || 0} 个。`,
+    `确认鉴权失效账号：${result.invalid || 0} 个。`,
     `额度耗尽账号：${result.rate_limited || 0} 个。`,
     '是否立即移除这些账号？正常账号不会受影响。',
   ].join('\n')

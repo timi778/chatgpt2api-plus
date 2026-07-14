@@ -56,12 +56,13 @@
         <div class="min-w-0">
           <div class="flex flex-wrap items-center gap-2">
             <p class="truncate text-sm font-medium text-foreground">{{ item.name || '普通用户' }}</p>
-            <span
-              class="rounded-md px-2 py-0.5 text-xs"
-              :class="item.enabled ? 'bg-emerald-50 text-emerald-700' : 'bg-secondary text-muted-foreground'"
+            <StateBadge
+              :tone="item.enabled ? 'success' : 'muted'"
+              size="xs"
+              shape="rounded"
             >
               {{ item.enabled ? '已启用' : '已禁用' }}
-            </span>
+            </StateBadge>
           </div>
           <p class="mt-1 text-xs text-muted-foreground">
             创建 {{ formatDateTime(item.created_at) }} · 最近使用 {{ formatDateTime(item.last_used_at) }}
@@ -104,6 +105,7 @@ import { Button } from 'nanocat-ui'
 import type { UserKey } from '@/api/userKeys'
 import PageLoadingState from '@/components/ai/PageLoadingState.vue'
 import PagePanel from '@/components/ai/PagePanel.vue'
+import StateBadge from '@/components/ai/StateBadge.vue'
 import StateBlock from '@/components/ai/StateBlock.vue'
 import { formatDateTime } from '@/views/settings/settingsView'
 

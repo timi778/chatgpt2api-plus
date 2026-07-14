@@ -19,7 +19,7 @@ from services.protocol import (
     openai_v1_response,
     openai_search,
 )
-from utils.helper import is_image_chat_request
+from utils.helper import has_response_image_generation_tool, is_image_chat_request
 
 
 class ImageGenerationRequest(BaseModel):
@@ -164,6 +164,7 @@ def create_router() -> APIRouter:
             "聊天生图" if image_chat else "文本生成",
             request_text=request_preview,
             request_shape=request_shape(payload.get("messages")),
+            image_request=image_chat,
         )
         attach_trace_headers(call, request)
         call.attach_trace_metadata(payload)
@@ -176,6 +177,7 @@ def create_router() -> APIRouter:
         payload = body.model_dump(mode="python")
         model = str(payload.get("model") or "auto")
         request_preview = request_text(payload.get("input"), payload.get("instructions"))
+        image_response = has_response_image_generation_tool(payload)
         call = LoggedCall(
             identity,
             "/v1/responses",
@@ -183,6 +185,7 @@ def create_router() -> APIRouter:
             "Responses",
             request_text=request_preview,
             request_shape=request_shape(payload.get("input")),
+            image_request=image_response,
         )
         call.attach_trace_metadata(payload)
         await filter_or_log(call, request_preview)

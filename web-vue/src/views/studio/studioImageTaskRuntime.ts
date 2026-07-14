@@ -181,7 +181,7 @@ export function useStudioImageTaskRuntime(input: StudioImageTaskRuntimeInput) {
         if (previousStatus !== 'done') input.hooks.markConversationNotice(conversation.id, 'done')
       } else if (task.status === 'error') {
         message.status = 'error'
-        message.error = taskPrimaryMessage(task) || task.error || '图片任务失败'
+        message.error = taskPrimaryMessage(task)
         if (previousStatus !== 'error') input.hooks.markConversationNotice(conversation.id, 'error')
       } else {
         message.status = 'running'

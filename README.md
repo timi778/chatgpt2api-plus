@@ -253,7 +253,6 @@ environment:
 | `image_parallel_generation` | `true` | 多图请求是否并行生成。 |
 | `image_account_concurrency` | `3` | 单账号图片并发上限。 |
 | `image_remove_conversation_after_result` | `false` | 图片成功保存后尝试隐藏上游 ChatGPT 官网会话。 |
-| `image_error_friendly_enabled` | `false` | 开启后对图片错误返回友好文案；关闭时尽量保留原始错误。 |
 | `auto_remove_invalid_accounts` | `true` | 鉴权失效账号是否自动移除。 |
 | `auto_remove_rate_limited_accounts` | `false` | 远程确认图片额度耗尽后是否自动移除账号。 |
 | `log_retention_days` | `30` | 调用日志自动清理天数。 |

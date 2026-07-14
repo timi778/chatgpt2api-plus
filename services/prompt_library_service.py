@@ -531,6 +531,9 @@ class PromptLibraryService:
             )
         except Exception as exc:
             with self._cache_lock:
+                current = dict(self._source_cache.get(DEFAULT_PROMPT_SOURCE_ID) or {})
+                if current.get("items"):
+                    return
                 self._source_cache[DEFAULT_PROMPT_SOURCE_ID] = {
                     "items": [],
                     "adapter": "json",
@@ -542,6 +545,9 @@ class PromptLibraryService:
             self._save_cache_snapshot_locked()
             return
         with self._cache_lock:
+            current = dict(self._source_cache.get(DEFAULT_PROMPT_SOURCE_ID) or {})
+            if current.get("items"):
+                return
             self._source_cache[DEFAULT_PROMPT_SOURCE_ID] = {
                 "items": items,
                 "adapter": adapter_name,
@@ -717,14 +723,12 @@ class PromptLibraryService:
         return sorted(items, key=_sort_key)
 
     def list_cached(self) -> dict[str, Any]:
-        with self._lock:
-            return self._list_cached_items_locked(include_disabled_items=False)
+        return self._list_cached_items_locked(include_disabled_items=False)
 
     def list_sources(self) -> list[dict[str, Any]]:
-        with self._lock:
-            sources = self._load_sources_locked()
-            self._seed_default_cache_locked(sources)
-            return [self._source_status_locked(source) for source in sources]
+        sources = self._load_sources_locked()
+        self._seed_default_cache_locked(sources)
+        return [self._source_status_locked(source) for source in sources]
 
     def update_source(self, source_id: str, payload: dict[str, Any]) -> dict[str, Any] | None:
         normalized_id = _clean(source_id)

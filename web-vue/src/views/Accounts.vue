@@ -7,7 +7,7 @@
             <Input
               :model-value="keyword"
               type="text"
-              placeholder="搜索账号 ID / 邮箱 / Token / 类型 / 来源"
+              placeholder="搜索账号 ID / 邮箱 / Token / 套餐 / 来源"
               block
               root-class="min-w-[14rem] flex-1 md:max-w-sm"
               @update:model-value="keyword = $event.trim()"
@@ -110,7 +110,7 @@
                 />
               </th>
               <th class="py-3 pr-5">TOKEN</th>
-              <th class="py-3 pr-5">类型 / 来源</th>
+              <th class="py-3 pr-5">来源 / 套餐</th>
               <th class="py-3 pr-5">状态</th>
               <th class="py-3 pr-5">账户信息</th>
               <th class="py-3 pr-5">创建时间</th>
@@ -209,11 +209,11 @@
                       <Input :model-value="form.id" disabled block />
                     </label>
                     <label class="text-xs">
-                      <span class="ui-field-label">类型</span>
+                      <span class="ui-field-label">套餐</span>
                       <Input
                         :model-value="form.type"
                         block
-                        placeholder="free / Plus / Pro"
+                        placeholder="留空表示未知（Free / Plus / Pro）"
                         @update:model-value="form.type = $event.trim()"
                       />
                     </label>
@@ -246,15 +246,17 @@
 
                 <FormSection title="调度属性" surface="plain">
                   <div class="grid grid-cols-1 gap-2 md:grid-cols-3">
-                    <label class="text-xs">
+                    <div class="text-xs">
                       <span class="ui-field-label">来源</span>
-                      <Input
-                        :model-value="form.source_type"
+                      <GroupedSelectMenu
+                        v-model="form.source_type"
+                        :options="accountSourceOptions"
+                        placeholder="来源"
+                        selected-indicator="none"
+                        aria-label="账号来源"
                         block
-                        placeholder="web / oauth_login / codex"
-                        @update:model-value="form.source_type = $event.trim()"
                       />
-                    </label>
+                    </div>
                     <label class="text-xs">
                       <span class="ui-field-label">图片额度</span>
                       <Input
@@ -848,6 +850,10 @@ const accountToolbarMenuClass = 'shrink-0 whitespace-nowrap'
 const accountToolbarButtonClass = 'shrink-0 whitespace-nowrap justify-between gap-2'
 const accountStatusDetailCardClass = 'w-72 account-status-detail-card'
 const accountToolbarSecondaryClass = `${accountToolbarButtonClass} text-muted-foreground`
+const accountSourceOptions = [
+  { label: 'Web', value: 'web' },
+  { label: 'Codex', value: 'codex' },
+] as const
 const importModalBusy = computed(() => importBusy.value || remoteImportBusy.value)
 
 const accountGroupNameMap = computed(() => buildAccountGroupNameMap(accountGroups.value))

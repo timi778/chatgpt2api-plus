@@ -9,18 +9,6 @@ const router = createRouter({
   history: createWebHashHistory(import.meta.env.BASE_URL),
   routes: [
     {
-      path: '/public/uptime',
-      name: 'public-uptime',
-      component: () => import('@/views/PublicUptime.vue'),
-      meta: { requiresAuth: false },
-    },
-    {
-      path: '/public/logs',
-      name: 'public-logs',
-      component: () => import('@/views/PublicLogs.vue'),
-      meta: { requiresAuth: false },
-    },
-    {
       path: '/login',
       name: 'login',
       component: () => import('@/views/Login.vue'),

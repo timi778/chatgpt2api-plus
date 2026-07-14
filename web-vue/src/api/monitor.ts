@@ -1,5 +1,4 @@
 import apiClient from './client'
-import type { UptimeResponse } from '@/types/api'
 
 export type MonitorMetricMap = Record<string, number>
 
@@ -129,9 +128,6 @@ export interface RealtimeMonitorResponse {
 }
 
 export const monitorApi = {
-  uptime(days = 90) {
-    return apiClient.get<never, UptimeResponse>('/public/uptime', { params: { days } })
-  },
   realtime() {
     return apiClient.get<never, RealtimeMonitorResponse>('/api/monitor/realtime')
   },

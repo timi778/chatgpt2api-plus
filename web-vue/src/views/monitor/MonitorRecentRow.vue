@@ -5,7 +5,7 @@
       <p class="mt-1 text-[11px] text-muted-foreground">{{ row.ended_at || row.updated_at || '-' }}</p>
     </td>
     <td>
-      <StateBadge :tone="statusTone(row.status)" shape="rounded" :bordered="false">
+      <StateBadge :tone="statusTone(row.status)" shape="rounded">
         {{ statusLabel(row.status) }}
       </StateBadge>
     </td>

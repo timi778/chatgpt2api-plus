@@ -1,6 +1,6 @@
 import { ref } from 'vue'
 
-import { accountsApi } from '@/api/accounts'
+import { accountsApi, type AccountSourceType } from '@/api/accounts'
 import { accountImportsApi } from '@/api/accountImports'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import { useToast } from '@/composables/useToast'
@@ -118,18 +118,18 @@ export function useAccountImportRuntime(options: AccountImportRuntimeOptions) {
     try {
       preview = await accountsApi.cleanupImportedAbnormalAccounts(importedTokens, false)
     } catch (error) {
-      options.setError('检查本次异常账号失败，已先保留', error)
+      options.setError('检查本次确认失效账号失败，已先保留', error)
       return
     }
 
     if (!preview.abnormal) {
-      toast.info('本次导入有刷新异常，但没有找到可清理的异常账号，可能未写入本地或状态已变化')
+      toast.info('本次导入有刷新失败，但没有确认失效账号；暂时检测失败的账号会保留')
       return
     }
 
     const confirmed = await confirmDialog.ask({
-      title: '移除本次异常账号？',
-      message: `本次导入刷新返回 ${errorCount} 条异常。\n后端确认 ${preview.abnormal} 个本次导入账号当前状态为异常，是否直接删除？\n\n只会删除本次导入且状态为异常的账号，正常、限流和历史账号会保留。`,
+      title: '移除本次确认失效账号？',
+      message: `本次导入刷新失败 ${errorCount} 个。\n后端确认其中 ${preview.abnormal} 个账号鉴权已经失效，是否直接删除？\n\n只会删除本次导入且已确认失效的账号；正常、限流、暂时检测失败和历史账号都会保留。`,
       confirmText: `删除 ${preview.abnormal} 个`,
       cancelText: '先保留',
     })
@@ -138,15 +138,15 @@ export function useAccountImportRuntime(options: AccountImportRuntimeOptions) {
 
     try {
       const result = await accountsApi.cleanupImportedAbnormalAccounts(importedTokens, true)
-      toast.success(`已移除 ${result.removed || 0} 个本次异常账号`)
+      toast.success(`已移除 ${result.removed || 0} 个本次确认失效账号`)
     } catch (error) {
-      options.setError('移除本次异常账号失败', error)
+      options.setError('移除本次确认失效账号失败', error)
     } finally {
       await options.loadData({ silentErrorToast: true })
     }
   }
 
-  async function importTokenBatch(tokens: string[], sourceType: string, title: string) {
+  async function importTokenBatch(tokens: string[], sourceType: AccountSourceType, title: string) {
     const normalizedTokens = uniqueTokens(tokens)
     if (!normalizedTokens.length) {
       toast.warning('没有可导入的 access token')
@@ -176,7 +176,6 @@ export function useAccountImportRuntime(options: AccountImportRuntimeOptions) {
           const result = await accountsApi.importAccounts(
             batch.map((accessToken) => ({
               access_token: accessToken,
-              type: 'free',
               source_type: sourceType,
             })),
             sourceType,
@@ -235,7 +234,7 @@ export function useAccountImportRuntime(options: AccountImportRuntimeOptions) {
   }
 
   async function importManualTokenText() {
-    await importTokenBatch(parseTokenLines(manualTokenText.value), 'manual', '导入 Access Token')
+    await importTokenBatch(parseTokenLines(manualTokenText.value), 'web', '导入 Access Token')
   }
 
   async function importTokenTextFile(file: File | null | undefined) {
@@ -246,7 +245,7 @@ export function useAccountImportRuntime(options: AccountImportRuntimeOptions) {
   }
 
   async function importSessionJson() {
-    await importTokenBatch(parseSessionJsonTokens(sessionJsonText.value), 'session_json', '导入 Session JSON')
+    await importTokenBatch(parseSessionJsonTokens(sessionJsonText.value), 'web', '导入 Session JSON')
   }
 
   async function startOAuthLogin() {
@@ -339,7 +338,7 @@ export function useAccountImportRuntime(options: AccountImportRuntimeOptions) {
         tokens.push(...parseCPAJsonTokens(text, file.name))
       }
       importBusy.value = false
-      await importTokenBatch(tokens, 'cpa_json', '导入 CPA JSON 文件')
+      await importTokenBatch(tokens, 'codex', '导入 CPA JSON 文件')
     } catch (error) {
       options.setError('导入 CPA JSON 文件失败', error)
     } finally {

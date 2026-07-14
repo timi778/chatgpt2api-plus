@@ -14,7 +14,11 @@ from __future__ import annotations
 
 import sys
 
-from services.account_service import account_service
+from services.account_service import (
+    RefreshCredentialsChangedError,
+    TerminalRefreshTokenError,
+    account_service,
+)
 
 
 def _fmt_remaining(seconds: int | None) -> str:
@@ -56,7 +60,20 @@ def force_refresh(tokens: list[str]) -> None:
     ok = 0
     for token in tokens:
         before = account_service.get_account(token) or {}
-        new_token = account_service.refresh_access_token(token, force=True, event="manual_verify")
+        try:
+            new_token = account_service.refresh_access_token(token, force=True, event="manual_verify")
+        except TerminalRefreshTokenError as exc:
+            print(f"- email={before.get('email') or '(未知)'}")
+            print(f"    旧 access_token[:20] = {token[:20]}...")
+            print(f"    >>> 刷新结果         = 终态失效 ❌ ({exc})")
+            print()
+            continue
+        except RefreshCredentialsChangedError as exc:
+            print(f"- email={before.get('email') or '(未知)'}")
+            print(f"    旧 access_token[:20] = {token[:20]}...")
+            print(f"    >>> 刷新结果         = 凭据已变化，已跳过 ({exc})")
+            print()
+            continue
         after = account_service.get_account(new_token) or {}
         err = str(after.get("last_token_refresh_error") or "").strip()
         rotated = new_token != token

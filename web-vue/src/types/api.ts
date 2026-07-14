@@ -50,20 +50,6 @@ export interface ClearanceTestResult {
   runtime?: ProxyRuntimeStatus
 }
 
-export interface ImageErrorMessages {
-  fallback: string
-  quota: string
-  no_account: string
-  local_busy: string
-  unsupported_model: string
-  poll_timeout: string
-  stream_interrupted: string
-  connection_failed: string
-  connection_timeout: string
-  token_invalid: string
-  text_reply: string
-}
-
 export interface Settings {
   proxy?: string
   fallback_proxy?: string
@@ -77,14 +63,13 @@ export interface Settings {
   image_poll_interval_secs?: number
   image_poll_initial_wait_secs?: number
   image_account_concurrency?: number
+  image_account_retry_enabled?: boolean
+  image_max_account_attempts?: number
   image_parallel_generation?: boolean
   image_remove_conversation_after_result?: boolean
-  image_error_friendly_enabled?: boolean
-  image_error_messages: ImageErrorMessages
   image_settle_enabled?: boolean
   image_check_before_hit_enabled?: boolean
   image_settle_secs?: number
-  image_timeout_retry_secs?: number
   auto_remove_invalid_accounts?: boolean
   auto_remove_rate_limited_accounts?: boolean
   log_levels: string[]
@@ -102,10 +87,6 @@ export interface Settings {
     base_url?: string
     proxy?: string
     image_expire_hours?: number
-  }
-  public_display: {
-    logo_url?: string
-    chat_url?: string
   }
   image_generation: {
     enabled: boolean
@@ -279,28 +260,6 @@ export interface AdminLogsResponse extends LogsResponse {
   stats: AdminLogStats
 }
 
-export type PublicLogStatus = 'success' | 'error' | 'timeout' | 'in_progress'
-
-export interface PublicLogEvent {
-  time: string
-  type: 'start' | 'select' | 'retry' | 'switch' | 'complete'
-  status?: 'success' | 'error' | 'timeout'
-  content: string
-}
-
-export interface PublicLogGroup {
-  request_id: string
-  start_time: string
-  status: PublicLogStatus
-  events: PublicLogEvent[]
-}
-
-export interface PublicLogsResponse {
-  total: number
-  logs: PublicLogGroup[]
-  error?: string
-}
-
 export interface AdminStatsTrend {
   labels: string[]
   total_requests: number[]
@@ -355,41 +314,6 @@ export interface AdminStats {
     conversation_id?: string
   }>
   trend: AdminStatsTrend
-}
-
-export interface PublicStats {
-  total_visitors: number
-  total_requests: number
-  requests_per_minute: number
-  load_status: 'low' | 'medium' | 'high'
-  load_color: string
-}
-
-export interface PublicDisplay {
-  logo_url?: string
-  chat_url?: string
-}
-
-export interface UptimeHeartbeat {
-  time: string
-  success: boolean
-  latency_ms?: number | null
-  status_code?: number | null
-  level?: 'up' | 'down' | 'warn'
-}
-
-export interface UptimeService {
-  name: string
-  status: 'up' | 'down' | 'warn' | 'unknown'
-  uptime: number
-  total: number
-  success: number
-  heartbeats: UptimeHeartbeat[]
-}
-
-export interface UptimeResponse {
-  services: Record<string, UptimeService>
-  updated_at: string
 }
 
 export interface LoginRequest {

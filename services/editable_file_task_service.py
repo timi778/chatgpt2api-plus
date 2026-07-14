@@ -6,7 +6,11 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from services.account_service import account_service
+from services.account_service import (
+    RefreshCredentialsChangedError,
+    TerminalRefreshTokenError,
+    account_service,
+)
 from services.config import DATA_DIR
 from services.content_filter import request_text
 from services.json_file import read_json_file, write_json_file
@@ -54,17 +58,24 @@ def _file_url(path: Path, base_url: str) -> str:
 
 
 def _editable_access_token() -> str:
-    accounts = [
-        item for item in account_service.list_accounts()
-        if _clean(item.get("access_token"))
-           and item.get("status") not in {"禁用", "异常"}
-           and account_service._account_matches_any_plan_type(item, EDITABLE_FILE_PLAN_TYPES)
-    ]
-    if not accounts:
-        raise RuntimeError("no available plus/team/pro account")
-    accounts.sort(key=lambda item: _clean(item.get("last_used_at")))
-    token = _clean(accounts[0].get("access_token"))
-    return account_service.refresh_access_token(token, event="editable_file_task") or token
+    attempted_tokens: set[str] = set()
+    while True:
+        accounts = [
+            item for item in account_service.list_accounts()
+            if (token := _clean(item.get("access_token")))
+               and token not in attempted_tokens
+               and account_service._is_account_selectable(item, allow_limited=True)
+               and account_service._account_matches_any_plan_type(item, EDITABLE_FILE_PLAN_TYPES)
+        ]
+        if not accounts:
+            raise RuntimeError("no available plus/team/pro account")
+        accounts.sort(key=lambda item: _clean(item.get("last_used_at")))
+        token = _clean(accounts[0].get("access_token"))
+        attempted_tokens.add(token)
+        try:
+            return account_service.refresh_access_token(token, event="editable_file_task")
+        except (TerminalRefreshTokenError, RefreshCredentialsChangedError):
+            continue
 
 
 def _public_task(task: dict[str, Any]) -> dict[str, Any]:

@@ -75,7 +75,7 @@ class AccountUpdateRequest(BaseModel):
     access_token: str = ""
     type: str | None = None
     source_type: str | None = None
-    status: str | None = None
+    status: Literal["正常", "限流", "异常", "禁用"] | None = None
     quota: int | None = None
     proxy: str | None = None
     group_id: str | None = None
@@ -83,7 +83,7 @@ class AccountUpdateRequest(BaseModel):
 
 class AccountBatchUpdateRequest(BaseModel):
     access_tokens: list[str] = Field(default_factory=list)
-    status: str | None = None
+    status: Literal["正常", "限流", "异常", "禁用"] | None = None
 
 
 class AccountGroupBindRequest(BaseModel):
@@ -271,88 +271,14 @@ def _upsert_account_group(body: AccountGroupRequest) -> dict[str, Any]:
     return {"group": item, **_account_group_payload(updated.get("account_groups", []))}
 
 
-def _truthy_value(value: object, default: bool = False) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    raw = _clean_text(value).lower()
-    if raw in {"1", "true", "yes", "y", "on"}:
-        return True
-    if raw in {"0", "false", "no", "n", "off", "none", "null", ""}:
-        return False
-    return default
-
-
-def _int_value(value: object) -> int:
-    try:
-        return int(float(str(value or "0").strip()))
-    except (TypeError, ValueError):
-        return 0
-
-
 def _account_status_category(account: dict[str, Any]) -> Literal["normal", "limited", "abnormal", "disabled"]:
     status = _clean_text(account.get("status"))
-    status_key = status.lower()
-    reason_code = _clean_text(account.get("status_reason_code")).lower()
-    error_kind = _clean_text(account.get("last_error_kind")).lower()
-
-    if (
-        status in {"禁用"}
-        or status_key in {"disabled", "auto_disabled"}
-        or reason_code == "disabled"
-        or _truthy_value(account.get("auto_disabled"))
-        or (account.get("enabled") is not None and not _truthy_value(account.get("enabled"), True))
-    ):
-        return "disabled"
-
-    if status in {"限流"} or status_key in {"limited", "rate_limited", "cooling", "backoff"}:
-        return "limited"
-    if status in {"异常"} or status_key in {"abnormal", "invalid", "error", "incomplete"}:
-        return "abnormal"
-
-    limited_reason_codes = {
-        "pro_cooldown",
-        "video_cooldown",
-        "lane_backoff",
-        "lane_degraded",
-        "image_generation_unavailable",
-        "image_degraded_to_fast",
-        "image_quota_exhausted",
-        "text_pending",
-    }
-    limited_error_kinds = {
-        "quota_exhausted",
-        "media_pending",
-        "media_generation_unavailable",
-        "media_degraded",
-        "lane_degraded",
-        "text_pending",
-    }
-    if reason_code in limited_reason_codes or error_kind in limited_error_kinds:
-        return "limited"
-
-    abnormal_reason_codes = {
-        "snlm0e_refresh_failed",
-        "account_invalid",
-        "parse_failure",
-        "upstream_error",
-    }
-    abnormal_error_kinds = {"auth_invalid", "parse_failure", "upstream_error"}
-    if (
-        reason_code in abnormal_reason_codes
-        or error_kind in abnormal_error_kinds
-        or _int_value(account.get("invalid_count")) > 0
-        or _clean_text(account.get("last_refresh_error"))
-        or _clean_text(account.get("last_token_refresh_error"))
-    ):
-        return "abnormal"
-
-    lane_backoff_summary = account.get("lane_backoff_summary")
-    if isinstance(lane_backoff_summary, dict) and _truthy_value(lane_backoff_summary.get("active")):
-        return "limited"
-
-    return "normal"
+    return {
+        "正常": "normal",
+        "限流": "limited",
+        "异常": "abnormal",
+        "禁用": "disabled",
+    }.get(status, "normal")
 
 
 def _account_status_label(
@@ -612,10 +538,7 @@ def create_router() -> APIRouter:
                 "errors": [],
                 "items": result.get("items", []) if body.return_items else [],
             }
-        refresh_result = account_service.refresh_accounts(
-            tokens,
-            remove_invalid=False,
-        )
+        refresh_result = account_service.refresh_accounts(tokens)
         return {
             **result,
             "refreshed": refresh_result.get("refreshed", 0),
@@ -726,8 +649,11 @@ def create_router() -> APIRouter:
         }
         if not updates:
             raise HTTPException(status_code=400, detail={"error": "还没有检测到改动，请修改后再保存"})
+        existed = account_service.get_account(access_token) is not None
         account = account_service.update_account(access_token, updates)
         if account is None:
+            if existed and account_service.get_account(access_token) is None:
+                return {"item": None, "removed": 1, "items": account_service.list_accounts()}
             raise HTTPException(status_code=404, detail={"error": "account not found"})
         return {"item": account, "items": account_service.list_accounts()}
 
@@ -741,14 +667,25 @@ def create_router() -> APIRouter:
         if not updates:
             raise HTTPException(status_code=400, detail={"error": "no updates provided"})
         updated = 0
+        removed = 0
         errors: list[str] = []
         for token in access_tokens:
+            existed = account_service.get_account(token) is not None
             account = account_service.update_account(token, updates, quiet=True)
             if account is None:
-                errors.append(f"{token[:6]}... not found")
+                if existed and account_service.get_account(token) is None:
+                    updated += 1
+                    removed += 1
+                else:
+                    errors.append(f"{token[:6]}... not found")
             else:
                 updated += 1
-        return {"updated": updated, "errors": errors, "items": account_service.list_accounts()}
+        return {
+            "updated": updated,
+            "removed": removed,
+            "errors": errors,
+            "items": account_service.list_accounts(),
+        }
 
     @router.post("/api/accounts/group")
     async def bind_accounts_group(body: AccountGroupBindRequest, authorization: str | None = Header(default=None)):
@@ -811,7 +748,7 @@ def create_router() -> APIRouter:
             "access_token": tokens["access_token"],
             "refresh_token": tokens["refresh_token"],
             "id_token": tokens["id_token"],
-            "source_type": "oauth_login",
+            "source_type": "web",
         }
         add_result = await run_in_threadpool(account_service.add_account_items, [payload])
         refresh_result = await run_in_threadpool(

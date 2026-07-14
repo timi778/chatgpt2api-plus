@@ -27,6 +27,7 @@ from services.image_service import (
     preview_image_retention_cleanup,
     storage_stats,
 )
+from services.image_failure import is_rate_limit_failure_code, is_structured_failure
 from services.image_storage_service import ImageStorageError, image_storage_service
 from services.image_tags_service import delete_tag, get_all_tags, set_tags
 from services.dashboard_metrics_service import dashboard_metrics_service
@@ -55,21 +56,19 @@ SETTINGS_UPDATE_KEYS = {
     "image_poll_interval_secs",
     "image_poll_initial_wait_secs",
     "image_account_concurrency",
+    "image_account_retry_enabled",
+    "image_max_account_attempts",
     "image_parallel_generation",
     "image_remove_conversation_after_result",
-    "image_error_friendly_enabled",
-    "image_error_messages",
     "image_settle_enabled",
     "image_check_before_hit_enabled",
     "image_settle_secs",
-    "image_timeout_retry_secs",
     "auto_remove_invalid_accounts",
     "auto_remove_rate_limited_accounts",
     "log_levels",
     "global_system_prompt",
     "sensitive_words",
     "ai_review",
-    "public_display",
     "image_generation",
     "quota_limits",
     "runtime_capacity",
@@ -429,11 +428,18 @@ def _dashboard_log_summary(items: list[dict[str, Any]], *, time_range: str) -> d
         status = _clean_text(_detail_value(item, "status", item.get("status"))).lower()
         endpoint = _clean_text(_detail_value(item, "endpoint"))
         model = _clean_text(_detail_value(item, "model"))
-        error_code = _clean_text(_detail_value(item, "error_code"))
+        error_code = _clean_text(
+            _detail_value(item, "error_code", _detail_value(item, "failure_code"))
+        ).lower()
         dt = _parse_log_time(_detail_value(item, "started_at", item.get("time")))
         idx = bucket_index(dt)
 
-        is_failed = status in {"failed", "error", "fail"} or bool(_detail_value(item, "error"))
+        is_failed = is_structured_failure(
+            status=status,
+            error=_detail_value(item, "error"),
+            error_code=_detail_value(item, "error_code"),
+            failure_code=_detail_value(item, "failure_code"),
+        )
         if is_failed:
             failed += 1
             if len(recent_failures) < 10:
@@ -464,7 +470,7 @@ def _dashboard_log_summary(items: list[dict[str, Any]], *, time_range: str) -> d
         if idx is not None:
             total_requests[idx] += 1
             if is_failed:
-                if error_code in {"rate_limited", "rate_limit", "429"}:
+                if is_rate_limit_failure_code(error_code) or is_rate_limit_failure_code(status):
                     rate_limited_requests[idx] += 1
                 else:
                     failed_requests[idx] += 1
@@ -549,93 +555,6 @@ def create_router(app_version: str) -> APIRouter:
     @router.get("/version")
     async def get_version():
         return {"version": app_version}
-
-    @router.get("/public/stats")
-    async def public_stats():
-        from services.account_service import account_service as acct_svc
-
-        stats = acct_svc.get_stats()
-        logs = log_service.list(type=LOG_TYPE_CALL, limit=500)
-        recent_cutoff = _beijing_now_naive() - timedelta(minutes=1)
-        recent = [
-            item for item in logs
-            if (_parse_log_time(_detail_value(item, "started_at", item.get("time"))) or datetime.min) >= recent_cutoff
-        ]
-        rpm = len(recent)
-        load_status = "high" if rpm >= 60 else "medium" if rpm >= 20 else "low"
-        load_color = {"high": "#ef4444", "medium": "#f59e0b", "low": "#22c55e"}[load_status]
-        return {
-            "total_visitors": int(stats.get("total") or 0),
-            "total_requests": len(logs),
-            "requests_per_minute": rpm,
-            "load_status": load_status,
-            "load_color": load_color,
-        }
-
-    @router.get("/public/display")
-    async def public_display():
-        public = config.get().get("public_display")
-        data = public if isinstance(public, dict) else {}
-        return {
-            "logo_url": str(data.get("logo_url") or ""),
-            "chat_url": str(data.get("chat_url") or ""),
-        }
-
-    @router.get("/public/log")
-    async def public_log(limit: int = Query(default=20, ge=1, le=100)):
-        items = log_service.list(type=LOG_TYPE_CALL, limit=limit)
-        groups = []
-        for item in items:
-            status = _clean_text(_detail_value(item, "status", item.get("status"))).lower()
-            failed = status in {"failed", "error", "fail"} or bool(_detail_value(item, "error"))
-            groups.append(
-                {
-                    "request_id": str(item.get("id") or ""),
-                    "start_time": str(item.get("time") or _detail_value(item, "started_at")),
-                    "status": "error" if failed else "success",
-                    "events": [
-                        {
-                            "time": str(item.get("time") or _detail_value(item, "started_at")),
-                            "type": "complete",
-                            "status": "error" if failed else "success",
-                            "content": str(item.get("summary") or _detail_value(item, "endpoint") or "调用日志"),
-                        }
-                    ],
-                }
-            )
-        return {"total": len(groups), "logs": groups}
-
-    @router.get("/public/uptime")
-    async def public_uptime(days: int = Query(default=90, ge=1, le=365)):
-        storage = config.get_storage_backend()
-        try:
-            storage_health = storage.health_check()
-            storage_ok = bool(storage_health.get("ok", True)) if isinstance(storage_health, dict) else True
-        except Exception:
-            storage_health = {}
-            storage_ok = False
-        now = beijing_now().isoformat(timespec="seconds")
-        return {
-            "updated_at": now,
-            "services": {
-                "api": {
-                    "name": "API",
-                    "status": "up",
-                    "uptime": 100,
-                    "total": 1,
-                    "success": 1,
-                    "heartbeats": [{"time": now, "success": True, "latency_ms": 0, "level": "up"}],
-                },
-                "storage": {
-                    "name": "Storage",
-                    "status": "up" if storage_ok else "warn",
-                    "uptime": 100 if storage_ok else 0,
-                    "total": 1,
-                    "success": 1 if storage_ok else 0,
-                    "heartbeats": [{"time": now, "success": storage_ok, "latency_ms": 0, "level": "up" if storage_ok else "warn"}],
-                },
-            },
-        }
 
     @router.get("/api/settings")
     async def get_settings(authorization: str | None = Header(default=None)):
@@ -803,14 +722,6 @@ def create_router(app_version: str) -> APIRouter:
         if not detail:
             raise HTTPException(status_code=404, detail={"error": "request not found"})
         return {"detail": detail}
-
-    @router.post("/api/monitor/realtime/{call_id}/cancel")
-    async def cancel_realtime_monitor_request(call_id: str, authorization: str | None = Header(default=None)):
-        require_admin(authorization)
-        result = realtime_monitor_service.cancel(call_id)
-        if not result.get("ok"):
-            raise HTTPException(status_code=404, detail={"error": result.get("error") or "request not found"})
-        return result
 
     @router.post("/api/proxy/test")
     async def test_proxy_endpoint(body: ProxyTestRequest, authorization: str | None = Header(default=None)):

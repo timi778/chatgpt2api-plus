@@ -162,6 +162,7 @@ import { useToast } from '@/composables/useToast'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import { usePageRuntime } from '@/composables/usePageRuntime'
 import { preloadPromptLibrary } from '@/composables/usePromptLibraryRuntime'
+import StudioPromptPicker from '@/components/studio/StudioPromptPicker.vue'
 import { downloadUrlAsFile } from '@/lib/downloads'
 import {
   buildStudioConversationLookup,
@@ -209,7 +210,6 @@ const StudioLightbox = defineAsyncComponent(() => import('@/components/studio/St
 const StudioMobileHistory = defineAsyncComponent(() => import('@/components/studio/StudioMobileHistory.vue'))
 const StudioInpaintModal = defineAsyncComponent(() => import('@/components/studio/StudioInpaintModal.vue'))
 const StudioImageCompareModal = defineAsyncComponent(() => import('@/components/studio/StudioImageCompareModal.vue'))
-const StudioPromptPicker = defineAsyncComponent(() => import('@/components/studio/StudioPromptPicker.vue'))
 
 const settingsStore = useSettingsStore()
 const toast = useToast()

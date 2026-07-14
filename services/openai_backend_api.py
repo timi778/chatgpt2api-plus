@@ -22,6 +22,18 @@ from PIL import Image
 
 from services.account_service import account_service
 from services.config import config
+from services.image_failure import (
+    ImageDownloadError,
+    ImageFailure,
+    ImageFailureError,
+    ImagePollTimeoutError,
+    InvalidAccessTokenError,
+    classify_conversation_failure,
+    classify_image_exception,
+    classify_task_failure,
+    is_terminal_message_status,
+    merge_message_failure,
+)
 from services.protocol.reasoning import normalize_thinking_effort
 from services.proxy_service import ProxyRuntimeProfile, proxy_settings
 from utils.helper import UpstreamHTTPError, ensure_ok, iter_sse_payloads, new_uuid, split_image_model
@@ -29,24 +41,6 @@ from utils.diagnostics import diagnostic_excerpt
 from utils.log import logger
 from utils.pow import build_legacy_requirements_token, build_proof_token, parse_pow_resources
 from utils.turnstile import solve_turnstile_token
-
-
-class InvalidAccessTokenError(RuntimeError):
-    pass
-
-
-class ImagePollTimeoutError(RuntimeError):
-    pass
-
-
-class ImageContentPolicyError(RuntimeError):
-    """Raised when image generation is blocked by content policy moderation."""
-    pass
-
-
-class ImageTextReplyError(RuntimeError):
-    """图片回合最终返回面向用户的文本，而不是图片产物。"""
-    pass
 
 
 @dataclass
@@ -115,27 +109,6 @@ CODEX_RESPONSES_INSTRUCTIONS = (
     "Use the image_generation tool to create exactly one image for the user's request. "
     "Return the generated image result."
 )
-
-# 内容政策违规错误关键词（上游拒绝生成图片的各种表述）
-_CONTENT_POLICY_KEYWORDS = (
-    # 明确的内容政策违规
-    "内容政策", "防护限制", "违反", "moderation", "policy", "blocked",
-    # 拒绝生成类
-    "不能生成", "无法生成", "不能帮助", "无法帮助",
-    # 敏感内容类
-    "裸体", "裸露", "色情", "性内容", "未成年",
-    # 通用拒绝
-    "抱歉，我不能",
-)
-
-
-def _is_content_policy_error(error_msg: str) -> bool:
-    """检查错误消息是否为内容政策违规。"""
-    if not error_msg:
-        return False
-    msg_lower = error_msg.lower()
-    return any(keyword in msg_lower for keyword in _CONTENT_POLICY_KEYWORDS)
-
 
 def _ms_from_seconds(value: Any) -> int:
     try:
@@ -254,8 +227,8 @@ class OpenAIBackendAPI:
         self.pow_script_sources: list[str] = []
         self.pow_data_build = ""
         self.progress_callback: Callable[[str], None] | None = None
-        self.cancel_checker: Callable[[], None] | None = None
         self._http_timings: dict[str, dict[str, Any]] = {}
+        self._image_result_timing: dict[str, int] = {}
         self._closed = False
         explicit_proxy = str(proxy or proxy_url or "").strip()
         self.proxy_profile = proxy_profile or proxy_settings.get_profile(
@@ -383,6 +356,37 @@ class OpenAIBackendAPI:
             return {}
         return dict(self._http_timings.get(name, {}) or {})
 
+    def _reset_image_result_timing(self) -> None:
+        self._image_result_timing = {}
+
+    def _add_image_result_timing(self, key: str, milliseconds: float) -> None:
+        if not key:
+            return
+        timing = getattr(self, "_image_result_timing", None)
+        if not isinstance(timing, dict):
+            timing = {}
+            self._image_result_timing = timing
+        value = max(0, int(round(float(milliseconds or 0))))
+        timing[key] = max(0, int(timing.get(key) or 0)) + value
+
+    def pop_image_result_timing(self) -> dict[str, int]:
+        timing = getattr(self, "_image_result_timing", None)
+        self._image_result_timing = {}
+        if not isinstance(timing, dict):
+            return {}
+        return {
+            str(key): max(0, int(value or 0))
+            for key, value in timing.items()
+            if str(key).endswith("_ms") and int(value or 0) > 0
+        }
+
+    def _sleep_for_image_poll(self, seconds: float) -> None:
+        sleep_for = max(0.0, float(seconds or 0))
+        if sleep_for <= 0:
+            return
+        self._add_image_result_timing("poll_wait_ms", sleep_for * 1000)
+        time.sleep(sleep_for)
+
     @classmethod
     def _is_image_stream_terminal_payload(cls, payload: str) -> bool:
         """Return True when an image SSE payload says the assistant turn is done.
@@ -404,7 +408,7 @@ class OpenAIBackendAPI:
             return False
         if not cls._payload_has_completion_marker(event):
             return False
-        return any(cls._is_terminal_status_value(status) for status in cls._payload_status_values(event))
+        return any(is_terminal_message_status(status) for status in cls._payload_status_values(event))
 
     def _iter_timed_sse_payloads(
             self,
@@ -423,7 +427,6 @@ class OpenAIBackendAPI:
             for payload in iter_sse_payloads(
                 response,
                 max_duration_secs=max_duration_secs,
-                cancel_checker=self.cancel_checker,
             ):
                 now = time.perf_counter()
                 gap_ms = int((now - last_event_at) * 1000)
@@ -532,7 +535,7 @@ class OpenAIBackendAPI:
         else:
             executor.shutdown(wait=True, cancel_futures=True)
 
-        plan_type = str(default_account.get("plan_type") or "free")
+        plan_type = account_service._normalize_account_type(default_account.get("plan_type"))
 
         limits_progress = init_payload.get("limits_progress")
         limits_progress = limits_progress if isinstance(limits_progress, list) else []
@@ -540,14 +543,15 @@ class OpenAIBackendAPI:
         result = {
             "email": me_payload.get("email"),
             "user_id": me_payload.get("id"),
-            "type": plan_type,
             "quota": quota,
             "image_quota_unknown": image_quota_unknown,
             "limits_progress": limits_progress,
             "default_model_slug": init_payload.get("default_model_slug"),
             "restore_at": restore_at,
-            "status": "正常" if image_quota_unknown and plan_type.lower() != "free" else ("限流" if quota == 0 else "正常"),
+            "status": "正常" if image_quota_unknown or quota > 0 else "限流",
         }
+        if plan_type:
+            result["type"] = plan_type
         logger.debug({
             "event": "backend_user_info_result",
             "email": result.get("email"),
@@ -2055,78 +2059,6 @@ class OpenAIBackendAPI:
         return "\n".join(part for part in parts if part).strip()
 
     @staticmethod
-    def _json_text_candidate(text: str) -> str:
-        value = str(text or "").strip()
-        fence = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", value, flags=re.IGNORECASE | re.DOTALL)
-        if fence:
-            return fence.group(1).strip()
-        return value
-
-    @classmethod
-    def _is_image_tool_argument_text(cls, text: str) -> bool:
-        """识别图片工具参数 JSON，避免误当成面向用户的文本回复。
-
-        ChatGPT 图片回合有时会把生成工具参数留在 conversation 里，例如
-        {"prompt": "...", "size": "...", "n": 1}。这属于内部生图尝试产物，
-        不能当作模型自然语言回复。
-        """
-        candidate = cls._json_text_candidate(text)
-        if not candidate:
-            return False
-
-        parsed: Any
-        try:
-            parsed = json.loads(candidate)
-        except (TypeError, ValueError):
-            stripped = candidate.lstrip()
-            if not stripped.startswith(("{", "[")):
-                return False
-            lower = stripped.lower()
-            if '"referenced_image_ids"' in lower:
-                return True
-            if '"prompt"' in lower and any(f'"{key}"' in lower for key in ("size", "n", "quality", "style")):
-                return True
-            return '"size"' in lower and '"n"' in lower
-
-        keys: set[str] = set()
-
-        def collect_keys(value: Any) -> None:
-            if isinstance(value, dict):
-                for key, item in value.items():
-                    keys.add(str(key).strip().lower())
-                    collect_keys(item)
-            elif isinstance(value, list):
-                for item in value:
-                    collect_keys(item)
-
-        collect_keys(parsed)
-        if "referenced_image_ids" in keys:
-            return True
-        if isinstance(parsed, dict) and set(keys).issubset({"skipped_mainline"}):
-            return True
-        image_option_keys = {
-            "size",
-            "n",
-            "quality",
-            "style",
-            "transparent_background",
-            "output_format",
-            "background",
-        }
-        if "prompt" in keys and keys.intersection(image_option_keys):
-            return True
-        return {"size", "n"}.issubset(keys)
-
-    @classmethod
-    def _is_human_facing_image_text_reply(cls, text: str) -> bool:
-        value = str(text or "").strip()
-        if not value:
-            return False
-        if cls._is_image_tool_argument_text(value):
-            return False
-        return True
-
-    @staticmethod
     def _payload_status_values(payload: Any | None) -> list[str]:
         """Extract status/state values from ChatGPT message payloads and SSE patches."""
         values: list[str] = []
@@ -2185,132 +2117,6 @@ class OpenAIBackendAPI:
 
         visit(payload)
         return found
-
-    @staticmethod
-    def _is_terminal_status_value(value: str) -> bool:
-        normalized = str(value or "").strip().lower()
-        if not normalized or "incomplete" in normalized:
-            return False
-        return (
-            normalized.startswith("finish")
-            or normalized.startswith("success")
-            or normalized.startswith("succeed")
-            or normalized in {"complete", "completed", "done"}
-        )
-
-    @classmethod
-    def _has_nonterminal_structured_status(cls, payload: Any | None) -> bool:
-        """Return True only when upstream exposes status but no completion marker."""
-        statuses = cls._payload_status_values(payload)
-        if not statuses:
-            return False
-        if cls._payload_has_completion_marker(payload):
-            return False
-        return not any(cls._is_terminal_status_value(status) for status in statuses)
-
-    @classmethod
-    def _is_image_generation_state_payload(cls, payload: Any | None) -> bool:
-        """Return True for structural image-generation state/tool payloads.
-
-        This deliberately does not inspect natural-language text (for example
-        ChatGPT's localized queue message).  It only uses message metadata and
-        embedded image references, so normal assistant text can still surface as
-        an upstream text reply.
-        """
-        if not isinstance(payload, dict):
-            return False
-        metadata = payload.get("metadata") or {}
-        content = payload.get("content") or {}
-        if not isinstance(metadata, dict):
-            metadata = {}
-        if not isinstance(content, dict):
-            content = {}
-
-        def meta_text(key: str) -> str:
-            value = payload.get(key)
-            if value in (None, ""):
-                value = metadata.get(key)
-            return str(value or "").strip().lower()
-
-        if meta_text("turn_use_case") == "image gen":
-            return True
-        if meta_text("async_task_type") == "image_gen":
-            return True
-        if meta_text("message_type") in {"image_generation", "image_gen"}:
-            return True
-
-        file_ids, sediment_ids = cls._extract_image_reference_ids(payload)
-        return bool(
-            file_ids
-            or sediment_ids
-            or cls._has_image_asset_pointer(content)
-            or cls._has_image_asset_pointer(metadata)
-        )
-
-    @classmethod
-    def _is_human_facing_image_text_reply_payload(cls, text: str, payload: Any | None = None) -> bool:
-        """只识别面向用户的文本回复；图片产物和工具参数不算文本回复。"""
-        if not cls._is_human_facing_image_text_reply(text):
-            return False
-        if payload is None:
-            return True
-        if cls._is_image_generation_state_payload(payload):
-            return False
-        if cls._has_nonterminal_structured_status(payload):
-            return False
-        file_ids, sediment_ids = cls._extract_image_reference_ids(payload)
-        if file_ids or sediment_ids:
-            return False
-        return not cls._has_image_asset_pointer(payload)
-
-    def _find_image_text_reply_in_conversation(self, data: Dict[str, Any]) -> str:
-        """返回最新的 assistant/tool 文本回复；跳过工具参数、图片产物和未完成消息。"""
-        mapping_value = data.get("mapping") or {}
-        mapping = mapping_value if isinstance(mapping_value, dict) else {}
-        candidates: list[tuple[float, str]] = []
-        for node in mapping.values():
-            message = (node or {}).get("message") or {}
-            if not isinstance(message, dict):
-                continue
-            author = message.get("author") or {}
-            role = str(author.get("role") or "").strip().lower()
-            if role not in {"assistant", "tool"}:
-                continue
-            text = self._editable_message_text(message)
-            if not self._is_human_facing_image_text_reply_payload(text, message):
-                continue
-            candidates.append((float(message.get("create_time") or 0.0), text))
-        if not candidates:
-            return ""
-        candidates.sort(key=lambda item: item[0])
-        return diagnostic_excerpt(candidates[-1][1], 2000)
-
-    def _find_actionable_image_text_reply_in_conversation(self, data: Dict[str, Any]) -> str:
-        """Return the final assistant text that terminates an image attempt.
-
-        Tool-role text is diagnostic only.  Successful image turns can briefly
-        expose tool/status text before file IDs are committed to the conversation
-        document, so treating any tool text as terminal causes false failures.
-        A real text fallback should surface as an assistant message for the user.
-        """
-        mapping_value = data.get("mapping") or {}
-        mapping = mapping_value if isinstance(mapping_value, dict) else {}
-        candidates: list[tuple[float, str]] = []
-        for node in mapping.values():
-            message = (node or {}).get("message") or {}
-            if not isinstance(message, dict):
-                continue
-            author = message.get("author") or {}
-            role = str(author.get("role") or "").strip().lower()
-            if role != "assistant":
-                continue
-            text = self._editable_message_text(message)
-            if self._is_human_facing_image_text_reply_payload(text, message):
-                candidates.append((float(message.get("create_time") or 0.0), text))
-        if not candidates:
-            return ""
-        candidates.sort(key=lambda item: item[0])
-        return diagnostic_excerpt(candidates[-1][1], 2000)
 
     @staticmethod
     def _extract_editable_export_paths(payload: Any, export_file_re: re.Pattern[str]) -> list[str]:
@@ -2686,41 +2492,6 @@ class OpenAIBackendAPI:
                  "sediment_ids": sediment_ids})
         return sorted(records, key=lambda item: item["create_time"])
 
-    @staticmethod
-    def _find_content_policy_error_in_conversation(data: Dict[str, Any]) -> str:
-        """从对话文档中查找内容政策违规错误消息。
-
-        上游拒绝生成图片时，错误消息会出现在 assistant 消息的文本中。
-        本方法遍历所有 assistant/tool 消息，检查是否包含内容政策违规关键词，
-        如果匹配则返回该消息文本（截断至 500 字符），否则返回空字符串。
-        """
-        mapping_value = data.get("mapping") or {}
-        mapping = mapping_value if isinstance(mapping_value, dict) else {}
-        for node in mapping.values():
-            message = (node or {}).get("message") or {}
-            author = message.get("author") or {}
-            role = str(author.get("role") or "").strip().lower()
-            if role not in {"assistant", "tool"}:
-                continue
-            content = message.get("content") or {}
-            # 提取消息文本
-            text_parts: list[str] = []
-            if isinstance(content, dict):
-                msg_parts = content.get("parts") or []
-                if isinstance(msg_parts, list):
-                    for part in msg_parts:
-                        if isinstance(part, str) and part.strip():
-                            text_parts.append(part.strip())
-                text_field = str(content.get("text") or "")
-                if text_field.strip():
-                    text_parts.append(text_field.strip())
-            elif isinstance(content, str) and content.strip():
-                text_parts.append(content.strip())
-            msg_text = "\n".join(text_parts)
-            if msg_text and _is_content_policy_error(msg_text):
-                return msg_text[:500]
-        return ""
-
     def _conversation_poll_snapshot(self, data: Dict[str, Any]) -> tuple[Dict[str, Any], str]:
         """Small last-state snapshot for poll timeout diagnostics."""
         mapping_value = data.get("mapping") or {}
@@ -2786,6 +2557,7 @@ class OpenAIBackendAPI:
           (capped at 16s, +jitter) honoring Retry-After when present.
         - All sleeps stay within timeout_secs; on exhaustion raises ImagePollTimeoutError.
         """
+        self._reset_image_result_timing()
         start = time.time()
         attempt = 0
         interval = float(config.image_poll_interval_secs)
@@ -2814,12 +2586,12 @@ class OpenAIBackendAPI:
         if has_initial_ids and config.image_settle_enabled:
             settle_for = min(config.image_settle_secs, max(0.0, _remaining()))
             if settle_for > 0:
-                time.sleep(settle_for)
+                self._sleep_for_image_poll(settle_for)
         elif initial_wait > 0:
             jitter = random.uniform(0, min(2.0, initial_wait * 0.2))
             sleep_for = min(initial_wait + jitter, max(0.0, _remaining()))
             if sleep_for > 0:
-                time.sleep(sleep_for)
+                self._sleep_for_image_poll(sleep_for)
 
         def _retry_sleep(reason: str, status_code: int | None, error: str | None, retry_after: int | None) -> bool:
             # retry_after=0 means "retry immediately" — must not be coerced via falsy check.
@@ -2841,36 +2613,47 @@ class OpenAIBackendAPI:
             if error is not None:
                 log_payload["error"] = error
             logger.warning(log_payload)
-            time.sleep(sleep_for)
+            self._sleep_for_image_poll(sleep_for)
             return True
 
         last_task_error = ""
         last_conversation_snapshot: Dict[str, Any] = {}
         last_assistant_text = ""
-        last_text_reply = ""
-        last_text_reply_actionable = False
+        last_retryable_poll_error: Exception | None = None
         while _remaining() > 0:
             attempt += 1
-            # 在每次轮询时，检查 /backend-api/tasks/ 是否有错误（仅记录，不中断）
-            # 内容政策违规检测通过对话文本进行（在 _find_content_policy_error_in_conversation 中）
             last_task_error = ""
+            task_failure: ImageFailure | None = None
             task_count = 0
             task_check_ok = False
+            task_query_started = time.perf_counter()
             try:
                 tasks = self._query_backend_tasks(conversation_id=conversation_id, timeout_secs=5.0)
                 task_count = len(tasks)
                 task_check_ok = True
                 for task in tasks:
+                    candidate_failure = classify_task_failure(task)
+                    if candidate_failure is None:
+                        continue
                     is_error, error_msg, metadata = self.check_task_error(task)
-                    if is_error and error_msg:
-                        last_task_error = error_msg
-                        logger.info({
-                            "event": "image_poll_task_error_not_blocking",
-                            "conversation_id": conversation_id,
-                            "attempt": attempt,
-                            "error_msg": error_msg,
-                            "metadata": metadata,
-                        })
+                    candidate_error = error_msg or (
+                        candidate_failure.raw_detail
+                        if isinstance(candidate_failure.raw_detail, str)
+                        else ""
+                    )
+                    selected_failure = merge_message_failure(task_failure, candidate_failure)
+                    if selected_failure is not task_failure:
+                        task_failure = selected_failure
+                        last_task_error = candidate_error
+                    logger.info({
+                        "event": "image_poll_task_failure",
+                        "conversation_id": conversation_id,
+                        "attempt": attempt,
+                        "failure_code": candidate_failure.code,
+                        "error_msg": diagnostic_excerpt(candidate_error, 1000),
+                        "metadata": metadata,
+                        "legacy_is_error": is_error,
+                    })
             except Exception as exc:
                 # tasks 查询失败不影响正常轮询流程
                 logger.debug({
@@ -2879,19 +2662,38 @@ class OpenAIBackendAPI:
                     "attempt": attempt,
                     "error": diagnostic_excerpt(exc, 300),
                 })
+            finally:
+                self._add_image_result_timing(
+                    "poll_request_ms",
+                    (time.perf_counter() - task_query_started) * 1000,
+                )
 
+            conversation_query_started = time.perf_counter()
             try:
-                conversation = self._get_conversation(conversation_id)
+                try:
+                    conversation = self._get_conversation(conversation_id)
+                finally:
+                    self._add_image_result_timing(
+                        "poll_request_ms",
+                        (time.perf_counter() - conversation_query_started) * 1000,
+                    )
             except UpstreamHTTPError as exc:
-                if exc.status_code in (429, 500, 502, 503, 504):
+                if exc.status_code in (404, 409, 423, 429, 500, 502, 503, 504):
+                    last_retryable_poll_error = (
+                        exc if classify_image_exception(exc).retryable else None
+                    )
                     if _retry_sleep("upstream_status", exc.status_code, None, exc.retry_after):
                         continue
                     break
                 raise
             except requests.exceptions.RequestException as exc:
+                last_retryable_poll_error = (
+                    exc if classify_image_exception(exc).retryable else None
+                )
                 if _retry_sleep("network", None, str(exc), None):
                     continue
                 break
+            last_retryable_poll_error = None
             last_conversation_snapshot, last_assistant_text = self._conversation_poll_snapshot(conversation)
 
             for record in self._extract_image_tool_records(conversation):
@@ -2902,41 +2704,38 @@ class OpenAIBackendAPI:
                     if sediment_id not in sediment_ids:
                         sediment_ids.append(sediment_id)
 
-            # 检查对话文本中是否包含内容政策违规错误
-            # 当上游拒绝生成图片时，错误消息会出现在对话文档的 assistant 消息中，
-            # 而非 /backend-api/tasks/ 的 task error 结构中。
-            # 如果在没有找到图片文件 ID 的同时检测到内容政策违规，立即中断轮询。
             if not file_ids and not sediment_ids:
-                policy_msg = self._find_content_policy_error_in_conversation(conversation)
-                if policy_msg:
-                    logger.warning({
-                        "event": "image_poll_conversation_text_policy_violation",
-                        "conversation_id": conversation_id,
-                        "attempt": attempt,
-                        "error_msg": policy_msg[:200],
-                    })
-                    raise ImageContentPolicyError(policy_msg)
-                text_reply = self._find_image_text_reply_in_conversation(conversation)
-                if text_reply:
-                    if text_reply != last_text_reply:
+                conversation_failure = classify_conversation_failure(conversation)
+                failure = merge_message_failure(task_failure, conversation_failure)
+                if failure is not None:
+                    if failure is task_failure:
+                        raw_detail = last_task_error or (
+                            failure.raw_detail if isinstance(failure.raw_detail, str) else ""
+                        )
+                    else:
+                        raw_detail = (
+                            failure.raw_detail
+                            if isinstance(failure.raw_detail, str)
+                            else last_assistant_text
+                        )
                         logger.info({
-                            "event": "image_poll_text_candidate",
+                            "event": "image_poll_conversation_failure",
                             "conversation_id": conversation_id,
                             "attempt": attempt,
+                            "failure_code": failure.code,
                             "task_count": task_count if task_check_ok else None,
-                            "text_preview": diagnostic_excerpt(text_reply, 300),
+                            "message_preview": diagnostic_excerpt(raw_detail, 1000),
                         })
-                    actionable_text_reply = self._find_actionable_image_text_reply_in_conversation(conversation)
-                    if actionable_text_reply:
-                        last_text_reply = actionable_text_reply
-                        last_text_reply_actionable = True
-                        exc = ImageTextReplyError(actionable_text_reply)
-                        setattr(exc, "conversation_id", conversation_id or "")
-                        setattr(exc, "upstream_error", actionable_text_reply)
-                        setattr(exc, "raw_upstream_message", actionable_text_reply)
-                        setattr(exc, "last_assistant_text", actionable_text_reply)
-                        setattr(exc, "last_conversation_snapshot", last_conversation_snapshot or {})
-                        raise exc
+                    exc = ImageFailureError(
+                        raw_detail,
+                        failure=failure.with_raw_detail(raw_detail or failure.raw_detail),
+                    )
+                    setattr(exc, "conversation_id", conversation_id or "")
+                    setattr(exc, "upstream_error", raw_detail)
+                    setattr(exc, "raw_upstream_message", raw_detail)
+                    setattr(exc, "last_assistant_text", last_assistant_text)
+                    setattr(exc, "last_conversation_snapshot", last_conversation_snapshot or {})
+                    raise exc
 
             logger.debug({"event": "image_poll_check", "conversation_id": conversation_id, "attempt": attempt,
                           "file_ids": file_ids, "sediment_ids": sediment_ids})
@@ -2962,14 +2761,29 @@ class OpenAIBackendAPI:
                              "settle_secs": config.image_settle_secs})
                 wait = min(config.image_settle_secs, max(0.0, _remaining()))
                 if wait > 0:
-                    time.sleep(wait)
+                    self._sleep_for_image_poll(wait)
                     continue
                 return file_ids, sediment_ids
             logger.debug({"event": "image_poll_wait", "conversation_id": conversation_id,
                           "elapsed_secs": round(time.time() - start, 1)})
             wait = min(interval, max(0.0, _remaining()))
             if wait > 0:
-                time.sleep(wait)
+                self._sleep_for_image_poll(wait)
+        if last_retryable_poll_error is not None:
+            failure = classify_image_exception(last_retryable_poll_error)
+            logger.info({
+                "event": "image_poll_terminal_upstream_error",
+                "conversation_id": conversation_id,
+                "timeout_secs": timeout_secs,
+                "attempts_made": attempt,
+                "failure_code": failure.code,
+            })
+            setattr(last_retryable_poll_error, "conversation_id", conversation_id or "")
+            setattr(last_retryable_poll_error, "poll_attempts", attempt)
+            setattr(last_retryable_poll_error, "poll_timeout_secs", timeout_secs)
+            setattr(last_retryable_poll_error, "last_assistant_text", last_assistant_text)
+            setattr(last_retryable_poll_error, "last_conversation_snapshot", last_conversation_snapshot or {})
+            raise last_retryable_poll_error
         logger.info({
             "event": "image_poll_timeout",
             "conversation_id": conversation_id,
@@ -2978,14 +2792,11 @@ class OpenAIBackendAPI:
             # attempts_made == 0 means the initial_wait consumed the entire budget — no HTTP attempted.
             "initial_wait_exhausted_budget": attempt == 0,
             "last_task_error": last_task_error if last_task_error else None,
-            "last_text_reply": last_text_reply if last_text_reply_actionable else None,
-            "last_assistant_text": last_assistant_text if last_text_reply_actionable else None,
+            "last_assistant_text": last_assistant_text or None,
             "last_conversation_snapshot": last_conversation_snapshot or None,
         })
         exc = ImagePollTimeoutError(
-            f"ChatGPT 生图超时（已等待 {timeout_secs} 秒）。"
-            f"当前超时阈值可在 config.json 中调大 image_poll_timeout_secs，"
-            f"也可能是账号被限流或生图队列拥堵导致。"
+            f"Image polling timed out after {timeout_secs} seconds."
         )
         if last_task_error:
             setattr(exc, "task_error", last_task_error)
@@ -2993,8 +2804,7 @@ class OpenAIBackendAPI:
         setattr(exc, "conversation_id", conversation_id or "")
         setattr(exc, "poll_attempts", attempt)
         setattr(exc, "poll_timeout_secs", timeout_secs)
-        setattr(exc, "last_assistant_text", last_assistant_text if last_text_reply_actionable else "")
-        setattr(exc, "last_text_reply", last_text_reply if last_text_reply_actionable else "")
+        setattr(exc, "last_assistant_text", last_assistant_text)
         setattr(exc, "last_conversation_snapshot", last_conversation_snapshot or {})
         if last_task_error:
             setattr(exc, "upstream_error", last_task_error)
@@ -3092,8 +2902,52 @@ class OpenAIBackendAPI:
 
     def _resolve_image_urls(self, conversation_id: str, file_ids: list[str], sediment_ids: list[str]) -> list[str]:
         """把图片结果 id 解析成可下载 URL。"""
-        urls = []
+        urls: list[str] = []
+        resolution_errors: list[Exception] = []
         skip_patterns = {"file_upload"}
+
+        def resolve_candidate(
+                source: str,
+                asset_id: str,
+                resolver: Callable[[], str],
+        ) -> str:
+            last_error: Exception | None = None
+            for attempt in range(2):
+                try:
+                    url = str(resolver() or "").strip()
+                except Exception as exc:
+                    last_error = exc
+                    failure = classify_image_exception(exc)
+                    logger.warning({
+                        "event": "image_download_url_retry" if attempt == 0 else "image_download_url_failed",
+                        "source": source,
+                        "conversation_id": conversation_id,
+                        "id": asset_id,
+                        "attempt": attempt + 1,
+                        "failure_code": failure.code,
+                        "error": diagnostic_excerpt(repr(exc), 300),
+                    })
+                    if attempt == 0:
+                        continue
+                    break
+                if url:
+                    return url
+                logger.warning({
+                    "event": "image_download_url_retry" if attempt == 0 else "image_download_url_failed",
+                    "source": source,
+                    "conversation_id": conversation_id,
+                    "id": asset_id,
+                    "attempt": attempt + 1,
+                    "failure_code": "empty_download_url",
+                })
+
+            resolution_errors.append(
+                last_error or ImageDownloadError(
+                    f"empty download URL for {source} result {asset_id}"
+                )
+            )
+            return ""
+
         for file_id in file_ids:
             if file_id in skip_patterns:
                 logger.debug({
@@ -3103,58 +2957,26 @@ class OpenAIBackendAPI:
                     "id": file_id,
                 })
                 continue
-            try:
-                url = self._get_file_download_url(file_id)
-            except Exception as exc:
-                logger.debug({
-                    "event": "image_download_url_failed",
-                    "source": "file",
-                    "conversation_id": conversation_id,
-                    "id": file_id,
-                    "error": diagnostic_excerpt(repr(exc), 300),
-                })
-                continue
+            url = resolve_candidate(
+                "file",
+                file_id,
+                lambda file_id=file_id: self._get_file_download_url(file_id),
+            )
             if url:
                 if url not in urls:
                     urls.append(url)
-            else:
-                logger.debug({
-                    "event": "image_download_url_empty",
-                    "source": "file",
-                    "conversation_id": conversation_id,
-                    "id": file_id,
-                })
-        if not conversation_id or not sediment_ids:
-            logger.debug({
-                "event": "image_urls_resolved",
-                "conversation_id": conversation_id,
-                "file_ids": file_ids,
-                "sediment_ids": sediment_ids,
-                "urls": urls,
-            })
-            return urls
-        for sediment_id in sediment_ids:
-            try:
-                url = self._get_attachment_download_url(conversation_id, sediment_id)
-            except Exception as exc:
-                logger.debug({
-                    "event": "image_download_url_failed",
-                    "source": "sediment",
-                    "conversation_id": conversation_id,
-                    "id": sediment_id,
-                    "error": diagnostic_excerpt(repr(exc), 300),
-                })
-                continue
-            if url:
-                if url not in urls:
+        if conversation_id:
+            for sediment_id in sediment_ids:
+                url = resolve_candidate(
+                    "sediment",
+                    sediment_id,
+                    lambda sediment_id=sediment_id: self._get_attachment_download_url(
+                        conversation_id,
+                        sediment_id,
+                    ),
+                )
+                if url and url not in urls:
                     urls.append(url)
-            else:
-                logger.debug({
-                    "event": "image_download_url_empty",
-                    "source": "sediment",
-                    "conversation_id": conversation_id,
-                    "id": sediment_id,
-                })
         logger.debug({
             "event": "image_urls_resolved",
             "conversation_id": conversation_id,
@@ -3162,7 +2984,29 @@ class OpenAIBackendAPI:
             "sediment_ids": sediment_ids,
             "urls": urls,
         })
+        if not urls and resolution_errors:
+            detail = diagnostic_excerpt(resolution_errors[0], 500)
+            error = ImageDownloadError(
+                f"image download URL resolution failed: {detail}"
+            )
+            setattr(error, "conversation_id", conversation_id or "")
+            raise error from resolution_errors[0]
         return urls
+
+    def _resolve_image_urls_with_timing(
+            self,
+            conversation_id: str,
+            file_ids: list[str],
+            sediment_ids: list[str],
+    ) -> list[str]:
+        started = time.perf_counter()
+        try:
+            return self._resolve_image_urls(conversation_id, file_ids, sediment_ids)
+        finally:
+            self._add_image_result_timing(
+                "resolve_ms",
+                (time.perf_counter() - started) * 1000,
+            )
 
     def resolve_conversation_image_urls(
             self,
@@ -3172,6 +3016,7 @@ class OpenAIBackendAPI:
             poll: bool = True,
             poll_timeout_secs: float | None = None,
     ) -> list[str]:
+        self._reset_image_result_timing()
         file_ids = [item for item in file_ids if item != "file_upload"]
         sediment_ids = list(sediment_ids)
         timeout = poll_timeout_secs if poll_timeout_secs is not None else config.image_poll_timeout_secs
@@ -3185,7 +3030,7 @@ class OpenAIBackendAPI:
                     "file_ids": file_ids,
                     "sediment_ids": sediment_ids,
                 })
-                return self._resolve_image_urls(conversation_id, file_ids, sediment_ids)
+                return self._resolve_image_urls_with_timing(conversation_id, file_ids, sediment_ids)
         if poll and conversation_id:
             logger.info({
                 "event": "image_resolve_poll_needed",
@@ -3202,12 +3047,7 @@ class OpenAIBackendAPI:
                     sediment_ids,
                 )
             except ImagePollTimeoutError as exc:
-                # 如果轮询超时且有 task error（如 moderation 拦截），抛出 ImageContentPolicyError
-                # 而非 ImagePollTimeoutError，让调用方能区分真正的超时和上游拒绝
-                task_error = getattr(exc, "task_error", "")
                 if not file_ids and not sediment_ids:
-                    if task_error and _is_content_policy_error(task_error):
-                        raise ImageContentPolicyError(task_error) from exc
                     raise
                 logger.warning({
                     "event": "image_resolve_poll_partial_timeout",
@@ -3228,15 +3068,42 @@ class OpenAIBackendAPI:
             else:
                 file_ids.extend(item for item in polled_file_ids if item and item not in file_ids)
                 sediment_ids.extend(item for item in polled_sediment_ids if item and item not in sediment_ids)
-        return self._resolve_image_urls(conversation_id, file_ids, sediment_ids)
+        return self._resolve_image_urls_with_timing(conversation_id, file_ids, sediment_ids)
 
     def download_image_bytes(self, urls: list[str]) -> list[bytes]:
-        images = []
+        images: list[bytes] = []
         for url in urls:
-            response = self.session.get(url, timeout=120)
-            ensure_ok(response, "image_download")
-            if response.content not in images:
-                images.append(response.content)
+            for attempt in range(2):
+                try:
+                    response = self.session.get(url, timeout=120)
+                    ensure_ok(response, "image_download")
+                    content = bytes(response.content or b"")
+                    if not content:
+                        if attempt == 0:
+                            logger.warning({
+                                "event": "image_download_retry",
+                                "reason": "empty_response",
+                                "url_host": urlparse(url).netloc,
+                            })
+                            continue
+                        raise ImageDownloadError("image download returned an empty response")
+                    if content not in images:
+                        images.append(content)
+                    break
+                except ImageDownloadError:
+                    raise
+                except Exception as exc:
+                    if attempt == 0:
+                        logger.warning({
+                            "event": "image_download_retry",
+                            "reason": classify_image_exception(exc).code,
+                            "url_host": urlparse(url).netloc,
+                            "error": diagnostic_excerpt(repr(exc), 300),
+                        })
+                        continue
+                    raise ImageDownloadError(
+                        f"image download failed: {diagnostic_excerpt(exc, 500)}"
+                    ) from exc
         return images
 
     def stream_conversation(

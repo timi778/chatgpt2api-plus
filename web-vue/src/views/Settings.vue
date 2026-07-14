@@ -35,7 +35,6 @@
               :image-poll-timeout-field="imagePollTimeoutField"
               :image-stream-timeout-field="imageStreamTimeoutField"
               :image-account-concurrency-field="imageAccountConcurrencyField"
-              :image-timeout-retry-field="imageTimeoutRetryField"
               :proxy-busy="proxyBusy"
               :proxy-test-result="proxyTestResult"
               @clear-proxy-test-result="proxyTestResult = null"
@@ -82,16 +81,12 @@
 
           <SettingsBasicPolicyPanel
             :settings="localSettings"
+            :image-max-account-attempts-field="imageMaxAccountAttemptsField"
             :image-settle-seconds-field="imageSettleSecondsField"
             @set-log-level="setLogLevel"
           />
         </div>
       </div>
-
-      <SettingsImageErrorsPanel
-        v-else-if="activeSettingsTab === 'image-errors'"
-        :settings="localSettings"
-      />
 
       <SettingsStorageReviewPanel
         v-else-if="activeSettingsTab === 'storage'"
@@ -266,7 +261,6 @@ import SettingsBasicPolicyPanel from '@/views/settings/SettingsBasicPolicyPanel.
 import SettingsBackupPanel from '@/views/settings/SettingsBackupPanel.vue'
 import SettingsExternalSourceModals from '@/views/settings/SettingsExternalSourceModals.vue'
 import SettingsExternalSourcesPanel from '@/views/settings/SettingsExternalSourcesPanel.vue'
-import SettingsImageErrorsPanel from '@/views/settings/SettingsImageErrorsPanel.vue'
 import SettingsIntegrationsPanel from '@/views/settings/SettingsIntegrationsPanel.vue'
 import SettingsProxyRuntimePanel from '@/views/settings/SettingsProxyRuntimePanel.vue'
 import SettingsPromptSourcesPanel from '@/views/settings/SettingsPromptSourcesPanel.vue'
@@ -471,13 +465,13 @@ const imageAccountConcurrencyField = useNumberSettingField(
   },
   { integer: true, min: 1, fallback: 3 },
 )
-const imageTimeoutRetryField = useNumberSettingField(
-  () => localSettings.value?.image_timeout_retry_secs ?? 30,
+const imageMaxAccountAttemptsField = useNumberSettingField(
+  () => localSettings.value?.image_max_account_attempts ?? 2,
   (value) => {
     if (!localSettings.value) return
-    localSettings.value.image_timeout_retry_secs = value
+    localSettings.value.image_max_account_attempts = value
   },
-  { integer: true, min: 1, fallback: 30 },
+  { integer: true, min: 1, max: 10, fallback: 2 },
 )
 const imageSettleSecondsField = useNumberSettingField(
   () => localSettings.value?.image_settle_secs ?? 5,

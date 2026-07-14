@@ -7,8 +7,8 @@ import {
   buildTimelineGroups,
   buildTimelineLegendItems,
   buildTimelineSegments,
+  summarizeTimeline,
   shouldAutoExpandTimeline,
-  type DetailTimelineStep,
 } from '@/views/logs/logDetailView'
 import {
   buildLogPreviewGalleryFile,
@@ -28,19 +28,17 @@ export function useLogDetailRuntime() {
   const selectedTimelineLegendItems = computed(() => buildTimelineLegendItems(selectedTimelineSegments.value))
   const selectedTimelineGroups = computed(() => buildTimelineGroups(selectedLog.value))
 
-  const selectedBottleneckStep = computed<DetailTimelineStep | null>(() => {
-    const steps = selectedTimelineGroups.value.flatMap((group) => group.steps)
-    return steps.reduce<DetailTimelineStep | null>((current, step) => {
-      if (!current || step.valueMs > current.valueMs) return step
-      return current
-    }, null)
-  })
-
-  const selectedTimelineStepCount = computed(() => selectedTimelineGroups.value.reduce((total, group) => total + group.steps.length, 0))
-  const selectedTimelineSegmentTotal = computed(() => selectedTimelineSegments.value.reduce((total, segment) => total + segment.valueMs, 0))
-  const timelineDetailsAutoExpanded = computed(() => shouldAutoExpandTimeline(selectedLog.value, selectedBottleneckStep.value))
+  const selectedTimelineSummary = computed(() => summarizeTimeline(
+    selectedTimelineSegments.value,
+    selectedTimelineGroups.value,
+  ))
+  const selectedTimelineStepCount = computed(() => selectedTimelineSummary.value.stepCount)
+  const selectedTimelineSegmentTotal = computed(() => selectedTimelineSummary.value.segmentTotalMs)
+  const timelineDetailsAutoExpanded = computed(() => shouldAutoExpandTimeline(
+    selectedLog.value,
+    selectedTimelineSummary.value.bottleneckStep,
+  ))
   const timelineDetailsVisible = computed(() => timelineDetailsExpanded.value)
-  const selectedHasTimeline = computed(() => selectedTimelineSegments.value.length > 0 || selectedTimelineGroups.value.length > 0)
 
   const selectedPrimaryDetailFields = computed(() => buildPrimaryDetailFields(selectedLog.value))
   const selectedDiagnosticDetailFields = computed(() => buildDiagnosticDetailFields(selectedLog.value))
@@ -96,10 +94,8 @@ export function useLogDetailRuntime() {
     selectedTimelineSegments,
     selectedTimelineLegendItems,
     selectedTimelineGroups,
-    selectedBottleneckStep,
     selectedTimelineStepCount,
     selectedTimelineSegmentTotal,
-    selectedHasTimeline,
     timelineDetailsVisible,
     isPreviewBroken,
     markPreviewBroken,

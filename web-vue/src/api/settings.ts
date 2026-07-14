@@ -1,5 +1,5 @@
 import apiClient from './client'
-import type { ImageErrorMessages, ProxyRuntimeSettings, Settings, SettingsUpdateResponse } from '@/types/api'
+import type { ProxyRuntimeSettings, Settings, SettingsUpdateResponse } from '@/types/api'
 
 export type RawSettings = Record<string, any>
 
@@ -84,20 +84,6 @@ export type ThirdPartyAppsSettings = Settings['third_party_apps']
 
 const DEFAULT_PROXY_RUNTIME_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36'
 
-const DEFAULT_IMAGE_ERROR_MESSAGES: ImageErrorMessages = {
-  fallback: '图片生成请求失败，请稍后重试。',
-  quota: '图片账号额度已用完，请稍后再试或联系管理员。',
-  no_account: '当前图片账号暂不可用，可能是账号池、并发或上游波动，请稍后重试。',
-  local_busy: '当前没有可用的图片账号或账号并发已满，请稍后重试。',
-  unsupported_model: '当前模型不支持图片生成，请检查 model 参数。',
-  poll_timeout: '图片任务暂未返回结果，可能仍在排队或上游处理较慢，请重试。',
-  stream_interrupted: '图片生成连接中断，可能是上游服务繁忙或网络波动，请重试。',
-  connection_failed: '连接上游图片服务失败，可能是网络或代理波动，请重试。',
-  connection_timeout: '连接上游图片服务超时，请稍后重试。',
-  token_invalid: '图片生成账号状态异常，请稍后重试。',
-  text_reply: '上游返回了文本说明，未生成图片。请调整提示词或重试。',
-}
-
 const SETTINGS_SAVE_KEYS = [
   'proxy',
   'fallback_proxy',
@@ -111,21 +97,19 @@ const SETTINGS_SAVE_KEYS = [
   'image_poll_interval_secs',
   'image_poll_initial_wait_secs',
   'image_account_concurrency',
+  'image_account_retry_enabled',
+  'image_max_account_attempts',
   'image_parallel_generation',
   'image_remove_conversation_after_result',
-  'image_error_friendly_enabled',
-  'image_error_messages',
   'image_settle_enabled',
   'image_check_before_hit_enabled',
   'image_settle_secs',
-  'image_timeout_retry_secs',
   'auto_remove_invalid_accounts',
   'auto_remove_rate_limited_accounts',
   'log_levels',
   'global_system_prompt',
   'sensitive_words',
   'ai_review',
-  'public_display',
   'image_generation',
   'quota_limits',
   'runtime_capacity',
@@ -139,10 +123,12 @@ function cleanString(value: unknown): string {
   return String(value || '').trim()
 }
 
-function numberValue(value: unknown, fallback: number, min?: number) {
+function numberValue(value: unknown, fallback: number, min?: number, max?: number) {
   const parsed = Number(value)
-  const next = Number.isFinite(parsed) ? parsed : fallback
-  return typeof min === 'number' ? Math.max(min, next) : next
+  let next = Number.isFinite(parsed) ? parsed : fallback
+  if (typeof min === 'number') next = Math.max(min, next)
+  if (typeof max === 'number') next = Math.min(max, next)
+  return next
 }
 
 function boolValue(value: unknown, fallback: boolean) {
@@ -216,20 +202,9 @@ export function normalizeProxyRuntime(raw: unknown): ProxyRuntimeSettings {
   }
 }
 
-function normalizeImageErrorMessages(raw: unknown): ImageErrorMessages {
-  const source = raw && typeof raw === 'object' ? raw as RawSettings : {}
-  return Object.fromEntries(
-    Object.entries(DEFAULT_IMAGE_ERROR_MESSAGES).map(([key, fallback]) => [
-      key,
-      cleanString(source[key]) || fallback,
-    ]),
-  ) as ImageErrorMessages
-}
-
 export function normalizeSettings(raw: RawSettings | null | undefined): Settings {
   const source = { ...(raw || {}) }
   const basic = source.basic && typeof source.basic === 'object' ? source.basic : {}
-  const publicDisplay = source.public_display && typeof source.public_display === 'object' ? source.public_display : {}
   const imageStorage = source.image_storage && typeof source.image_storage === 'object' ? source.image_storage : {}
   const aiReview = source.ai_review && typeof source.ai_review === 'object' ? source.ai_review : {}
   const backup = source.backup && typeof source.backup === 'object' ? source.backup : {}
@@ -251,15 +226,14 @@ export function normalizeSettings(raw: RawSettings | null | undefined): Settings
     image_poll_interval_secs: numberValue(source.image_poll_interval_secs, 10, 0.5),
     image_poll_initial_wait_secs: numberValue(source.image_poll_initial_wait_secs, 10, 0),
     image_account_concurrency: numberValue(source.image_account_concurrency, 3, 1),
+    image_account_retry_enabled: boolValue(source.image_account_retry_enabled, true),
+    image_max_account_attempts: numberValue(source.image_max_account_attempts, 2, 1, 10),
     image_parallel_generation: boolValue(source.image_parallel_generation, true),
     image_remove_conversation_after_result: boolValue(source.image_remove_conversation_after_result, false),
-    image_error_friendly_enabled: boolValue(source.image_error_friendly_enabled, false),
-    image_error_messages: normalizeImageErrorMessages(source.image_error_messages),
     image_settle_enabled: boolValue(source.image_settle_enabled, true),
     image_check_before_hit_enabled: boolValue(source.image_check_before_hit_enabled, true),
     image_settle_secs: numberValue(source.image_settle_secs, 5, 0.5),
-    image_timeout_retry_secs: numberValue(source.image_timeout_retry_secs, 30, 1),
-    auto_remove_invalid_accounts: boolValue(source.auto_remove_invalid_accounts, false),
+    auto_remove_invalid_accounts: boolValue(source.auto_remove_invalid_accounts, true),
     auto_remove_rate_limited_accounts: boolValue(source.auto_remove_rate_limited_accounts, false),
     log_levels: Array.isArray(source.log_levels)
       ? source.log_levels.map((item) => cleanString(item).toLowerCase()).filter((item) => ['debug', 'info', 'warning', 'error'].includes(item))
@@ -281,10 +255,6 @@ export function normalizeSettings(raw: RawSettings | null | undefined): Settings
       base_url: cleanString(source.base_url ?? basic.base_url),
       proxy: cleanString(source.proxy ?? basic.proxy),
       image_expire_hours: numberValue(source.image_retention_days ?? basic.image_expire_hours, 15, 1),
-    },
-    public_display: {
-      logo_url: cleanString(publicDisplay.logo_url),
-      chat_url: cleanString(publicDisplay.chat_url),
     },
     image_generation: {
       enabled: boolValue(source.image_generation?.enabled, true),
@@ -375,21 +345,19 @@ function toBackendSettings(settings: Settings): RawSettings {
     image_poll_interval_secs: numberValue(normalized.image_poll_interval_secs, 10, 0.5),
     image_poll_initial_wait_secs: numberValue(normalized.image_poll_initial_wait_secs, 10, 0),
     image_account_concurrency: numberValue(normalized.image_account_concurrency, 3, 1),
+    image_account_retry_enabled: boolValue(normalized.image_account_retry_enabled, true),
+    image_max_account_attempts: numberValue(normalized.image_max_account_attempts, 2, 1, 10),
     image_parallel_generation: boolValue(normalized.image_parallel_generation, true),
     image_remove_conversation_after_result: boolValue(normalized.image_remove_conversation_after_result, false),
-    image_error_friendly_enabled: boolValue(normalized.image_error_friendly_enabled, false),
-    image_error_messages: cloneRawSettings(normalized.image_error_messages),
     image_settle_enabled: boolValue(normalized.image_settle_enabled, true),
     image_check_before_hit_enabled: boolValue(normalized.image_check_before_hit_enabled, true),
     image_settle_secs: numberValue(normalized.image_settle_secs, 5, 0.5),
-    image_timeout_retry_secs: numberValue(normalized.image_timeout_retry_secs, 30, 1),
-    auto_remove_invalid_accounts: boolValue(normalized.auto_remove_invalid_accounts, false),
+    auto_remove_invalid_accounts: boolValue(normalized.auto_remove_invalid_accounts, true),
     auto_remove_rate_limited_accounts: boolValue(normalized.auto_remove_rate_limited_accounts, false),
     log_levels: Array.isArray(normalized.log_levels) ? [...normalized.log_levels] : [],
     global_system_prompt: cleanString(normalized.global_system_prompt),
     sensitive_words: Array.isArray(normalized.sensitive_words) ? [...normalized.sensitive_words] : [],
     ai_review: cloneRawSettings(normalized.ai_review),
-    public_display: cloneRawSettings(normalized.public_display),
     image_generation: cloneRawSettings(normalized.image_generation),
     quota_limits: cloneRawSettings(normalized.quota_limits),
     runtime_capacity: cloneRawSettings(normalized.runtime_capacity),

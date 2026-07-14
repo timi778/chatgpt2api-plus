@@ -14,7 +14,26 @@
             <HelpTip text="只有远程明确确认图片额度为 0 时才会处理，代理错误、断流或上游 429 不会删除账号。" />
           </div>
         </div>
+        <div class="settings-check-item">
+          <div class="settings-check-control">
+            <Checkbox v-model="settings.image_account_retry_enabled">失败后自动尝试其他账号</Checkbox>
+            <HelpTip text="仅账号、鉴权、限流或上游异常会切换账号；提示词、输入和图片下载错误不会切换。" />
+          </div>
+        </div>
       </div>
+      <FormField label="最大尝试账号数">
+        <template #label-extra>
+          <HelpTip text="包含第一次使用的账号。默认 2，表示当前账号失败后最多再换 1 个账号。" />
+        </template>
+        <Input
+          :model-value="imageMaxAccountAttemptsField.input.value"
+          type="number"
+          block
+          placeholder="2"
+          :disabled="!settings.image_account_retry_enabled"
+          @update:model-value="imageMaxAccountAttemptsField.update"
+        />
+      </FormField>
     </FormSection>
 
     <FormSection title="图片确认">
@@ -74,6 +93,7 @@ import type { NumberSettingField } from '@/views/settings/useNumberSettingField'
 
 defineProps<{
   settings: Settings
+  imageMaxAccountAttemptsField: NumberSettingField
   imageSettleSecondsField: NumberSettingField
 }>()
 

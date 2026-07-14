@@ -195,7 +195,21 @@ def ensure_ok(response: requests.Response, context: str) -> None:
     raise UpstreamHTTPError(context, response.status_code, body, retry_after=retry_after)
 
 
-def sse_json_stream(items) -> Iterator[str]:
+def _stream_error_payload(
+    exc: Exception,
+    error_builder: Callable[[Exception], dict[str, Any]] | None,
+) -> dict[str, Any]:
+    if hasattr(exc, "to_openai_error"):
+        return exc.to_openai_error()
+    if error_builder is not None:
+        return error_builder(exc)
+    return {"error": {"message": str(exc), "type": exc.__class__.__name__}}
+
+
+def sse_json_stream(
+    items,
+    error_builder: Callable[[Exception], dict[str, Any]] | None = None,
+) -> Iterator[str]:
     yield ": stream-open\n\n"
     try:
         for item in items:
@@ -206,14 +220,15 @@ def sse_json_stream(items) -> Iterator[str]:
             "error_type": exc.__class__.__name__,
             "error": str(exc),
         })
-        error = exc.to_openai_error() if hasattr(exc, "to_openai_error") else {
-            "error": {"message": str(exc), "type": exc.__class__.__name__}
-        }
+        error = _stream_error_payload(exc, error_builder)
         yield f"data: {json.dumps(error, ensure_ascii=False)}\n\n"
     yield "data: [DONE]\n\n"
 
 
-def image_sse_stream(items) -> Iterator[str]:
+def image_sse_stream(
+    items,
+    error_builder: Callable[[Exception], dict[str, Any]] | None = None,
+) -> Iterator[str]:
     try:
         for item in items:
             event = str(item.get("type") or "message") if isinstance(item, dict) else "message"
@@ -225,9 +240,7 @@ def image_sse_stream(items) -> Iterator[str]:
             "error_type": exc.__class__.__name__,
             "error": str(exc),
         })
-        error = exc.to_openai_error() if hasattr(exc, "to_openai_error") else {
-            "error": {"message": str(exc), "type": exc.__class__.__name__}
-        }
+        error = _stream_error_payload(exc, error_builder)
         yield "event: error\n"
         yield f"data: {json.dumps(error, ensure_ascii=False)}\n\n"
 
@@ -260,7 +273,6 @@ def _format_timeout_secs(value: float) -> str:
 def iter_sse_payloads(
     response: requests.Response,
     max_duration_secs: float | None = None,
-    cancel_checker: Callable[[], None] | None = None,
 ) -> Iterator[str]:
     started_at = time.monotonic()
     timeout_secs = float(max_duration_secs or 0)
@@ -276,12 +288,6 @@ def iter_sse_payloads(
         return timeout_secs - (time.monotonic() - started_at)
 
     def _raise_if_timeout() -> None:
-        if cancel_checker is not None:
-            try:
-                cancel_checker()
-            except Exception:
-                _abort_stream_nonblocking()
-                raise
         remaining = _remaining_secs()
         if remaining is not None and remaining <= 0:
             _abort_stream_nonblocking()

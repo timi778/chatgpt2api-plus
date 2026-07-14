@@ -35,6 +35,7 @@ git_cache/
 .playwright-mcp/
 /logs/
 *.log
+/logs.jsonl
 runtime/
 loginwithpassword_*/
 logwithemailverifycode_*/

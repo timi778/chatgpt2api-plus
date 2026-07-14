@@ -17,16 +17,23 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from services.config import DATA_DIR
+from services.image_failure import ImageGenerationError, is_rate_limit_failure_code, is_structured_failure
 from services.protocol.error_response import anthropic_error_response, openai_error_response
 from services.realtime_monitor_service import realtime_monitor_service
-from utils.diagnostics import exception_diagnostic_fields
+from utils.diagnostics import diagnostic_excerpt, exception_diagnostic_fields
 from utils.helper import anthropic_sse_stream, image_sse_stream, sse_json_stream
 from utils.log import logger
 from utils.timezone import beijing_from_timestamp, beijing_now_str
 
 LOG_TYPE_CALL = "call"
 LOG_TYPE_ACCOUNT = "account"
-INTERNAL_RESPONSE_KEYS = {"_account_email", "_conversation_id", "_call_id", "_image_urls"}
+INTERNAL_RESPONSE_KEYS = {
+    "_account_email",
+    "_conversation_id",
+    "_call_id",
+    "_image_urls",
+    "_image_attempts",
+}
 LOG_IMAGE_URL_RE = re.compile(r"(?:!\[[^\]]*\]\()(?P<url>(?:https?://|/images/|/image-thumbnails/)[^\s)\"']+)\)")
 PERF_WAIT_WARN_MS = 1000
 REQUEST_TEXT_EXCERPT_LIMIT = 1000
@@ -106,18 +113,24 @@ class LogService:
 
     @classmethod
     def _is_failed(cls, item: dict[str, Any]) -> bool:
-        status = cls._clean(cls._detail_value(item, "status")).lower()
-        return status in {"failed", "error", "fail"} or bool(
-            cls._detail_value(item, "error") or cls._detail_value(item, "error_code")
+        return is_structured_failure(
+            status=cls._detail_value(item, "status"),
+            error=cls._detail_value(item, "error"),
+            error_code=cls._detail_value(item, "error_code"),
+            failure_code=cls._detail_value(item, "failure_code"),
         )
 
     @classmethod
     def _is_limited(cls, item: dict[str, Any]) -> bool:
-        text = " ".join(
-            cls._clean(cls._detail_value(item, key))
-            for key in ("status", "error_code", "reason", "error")
-        ).lower()
-        return any(keyword in text for keyword in ("limit", "quota", "429", "rate_limited", "rate limit", "受限", "限流"))
+        status = cls._clean(cls._detail_value(item, "status")).lower()
+        error_code = cls._clean(
+            cls._detail_value(
+                item,
+                "error_code",
+                cls._detail_value(item, "failure_code"),
+            )
+        )
+        return is_rate_limit_failure_code(status) or is_rate_limit_failure_code(error_code)
 
     @classmethod
     def _is_image_log(cls, item: dict[str, Any]) -> bool:
@@ -700,6 +713,121 @@ def _collect_conversation_ids(value: object) -> list[str]:
     return ids
 
 
+IMAGE_ATTEMPT_KEYS = {
+    "slot",
+    "attempt",
+    "account_email",
+    "status",
+    "failure_code",
+    "conversation_id",
+    "duration_ms",
+    "monitor",
+}
+IMAGE_ATTEMPT_INTEGER_KEYS = {"slot", "attempt", "duration_ms"}
+
+
+def _normalize_image_attempt_monitor(value: object) -> dict[str, object] | None:
+    if not isinstance(value, dict):
+        return None
+    monitor: dict[str, object] = {}
+    raw_metrics = value.get("metrics")
+    if isinstance(raw_metrics, dict):
+        metrics: dict[str, int] = {}
+        for key, item in raw_metrics.items():
+            if not str(key).endswith("_ms"):
+                continue
+            try:
+                parsed = max(0, int(item))
+            except (TypeError, ValueError):
+                continue
+            if parsed > 0:
+                metrics[str(key)] = parsed
+        if metrics:
+            monitor["metrics"] = metrics
+    raw_events = value.get("events")
+    if isinstance(raw_events, list):
+        events: list[dict[str, object]] = []
+        for raw_event in raw_events[-40:]:
+            if not isinstance(raw_event, dict):
+                continue
+            event: dict[str, object] = {}
+            for key, item in raw_event.items():
+                if str(key).endswith("_ms"):
+                    try:
+                        parsed = max(0, int(item))
+                    except (TypeError, ValueError):
+                        continue
+                    if parsed > 0:
+                        event[str(key)] = parsed
+                elif key in {"time", "event", "label", "status"}:
+                    text = str(item or "").strip()
+                    if text:
+                        event[key] = text
+            if event:
+                events.append(event)
+        if events:
+            monitor["events"] = events
+    return monitor or None
+
+
+def _normalize_image_attempt(value: object) -> dict[str, object] | None:
+    if not isinstance(value, dict):
+        return None
+    if not ({"slot", "attempt", "status"} <= value.keys()):
+        return None
+    attempt: dict[str, object] = {}
+    for key in IMAGE_ATTEMPT_KEYS:
+        item = value.get(key)
+        if item in (None, ""):
+            continue
+        if key == "monitor":
+            monitor = _normalize_image_attempt_monitor(item)
+            if monitor:
+                attempt[key] = monitor
+        elif key in IMAGE_ATTEMPT_INTEGER_KEYS:
+            try:
+                attempt[key] = max(0, int(item))
+            except (TypeError, ValueError):
+                continue
+        else:
+            text = str(item).strip()
+            if text:
+                attempt[key] = text
+    if not ({"slot", "attempt", "status"} <= attempt.keys()):
+        return None
+    return attempt
+
+
+def collect_image_attempts(value: object) -> list[dict[str, object]]:
+    attempts: list[dict[str, object]] = []
+    seen: set[str] = set()
+    pending: list[object] = [value]
+    visited: set[int] = set()
+    while pending:
+        item = pending.pop()
+        if isinstance(item, BaseException):
+            pending.append(getattr(item, "image_attempts", None))
+            continue
+        if isinstance(item, dict):
+            identity = id(item)
+            if identity in visited:
+                continue
+            visited.add(identity)
+            normalized = _normalize_image_attempt(item)
+            if normalized is not None:
+                signature = json.dumps(normalized, ensure_ascii=False, sort_keys=True)
+                if signature not in seen:
+                    seen.add(signature)
+                    attempts.append(normalized)
+                continue
+            for key, child in item.items():
+                if key in {"_image_attempts", "image_attempts"} or isinstance(child, (dict, list, tuple)):
+                    pending.append(child)
+        elif isinstance(item, (list, tuple)):
+            pending.extend(reversed(item))
+    return attempts
+
+
 IMAGE_TRACE_REQUEST_KEYS = {
     "n",
     "size",
@@ -795,30 +923,40 @@ def _request_full_text(text: object, limit: int = REQUEST_TEXT_FULL_LIMIT) -> tu
     return normalized[: limit - 1].rstrip() + "…", True
 
 
-def _exception_log_fields(exc: Exception) -> dict[str, object]:
-    return exception_diagnostic_fields(exc, include_status_code=True)
+def _exception_log_fields(exc: Exception, *, image: bool = False) -> dict[str, object]:
+    fields = exception_diagnostic_fields(exc, include_status_code=True)
+    attempts = collect_image_attempts(exc)
+    if attempts:
+        fields["image_attempts"] = attempts
+    failure = getattr(exc, "failure", None)
+    if image or failure is not None:
+        from services.image_failure import classify_image_exception
+
+        failure = classify_image_exception(exc)
+        fields.update(failure.diagnostic_fields())
+        fields["error_code"] = failure.code
+        fields.setdefault("raw_error", diagnostic_excerpt(str(exc), 4000))
+    return fields
+
+def _image_error_payload(exc: Exception) -> dict[str, object]:
+    from services.image_failure import classify_image_exception, public_image_error_message
+
+    failure = classify_image_exception(exc)
+    return {
+        "error": {
+            "message": public_image_error_message(failure, exc),
+            "type": failure.error_type,
+            "param": getattr(exc, "param", None),
+            "code": failure.code,
+        }
+    }
+
 
 def _image_error_response(exc: Exception) -> JSONResponse:
-    from services.protocol.conversation import public_image_error_message
+    from services.image_failure import classify_image_exception
 
-    raw_message = str(exc)
-    message = public_image_error_message(raw_message)
-    raw_lower = raw_message.lower()
-    if hasattr(exc, "to_openai_error") and hasattr(exc, "status_code"):
-        return JSONResponse(status_code=int(exc.status_code), content=exc.to_openai_error())
-    if "quota_exhausted" in raw_lower or "insufficient_quota" in raw_lower:
-        return openai_error_response(
-            {
-                "error": {
-                    "message": message,
-                    "type": "insufficient_quota",
-                    "param": None,
-                    "code": "insufficient_quota",
-                }
-            },
-            429,
-        )
-    return openai_error_response(message, 502)
+    failure = classify_image_exception(exc)
+    return openai_error_response(_image_error_payload(exc), failure.status_code)
 
 
 def _protocol_error_response(exc: Exception, status_code: int, sse: str) -> JSONResponse:
@@ -844,15 +982,15 @@ class LoggedCall:
     started: float = field(default_factory=time.time)
     request_text: str = ""
     request_shape: dict[str, int] | None = None
+    image_request: bool = False
     call_id: str = field(default_factory=lambda: uuid4().hex[:16])
     perf_timings: dict[str, int] = field(default_factory=dict)
     trace_metadata: dict[str, object] = field(default_factory=dict)
 
     async def run(self, handler, *args, sse: str = "openai"):
-        from services.protocol.conversation import ImageGenerationError
-
         if args and isinstance(args[0], dict):
             self.attach_trace_metadata(args[0])
+        image_request = self._is_image_request()
         trace_perf = self._trace_image_perf()
         if trace_perf:
             realtime_monitor_service.start(
@@ -895,15 +1033,16 @@ class LoggedCall:
             result = await run_in_threadpool(_call_handler)
         except ImageGenerationError as exc:
             self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""),
-                     conversation_id=getattr(exc, "conversation_id", ""), extra=_exception_log_fields(exc))
+                     conversation_id=getattr(exc, "conversation_id", ""),
+                     extra=_exception_log_fields(exc, image=image_request))
             return _image_error_response(exc)
         except HTTPException as exc:
             self.log("调用失败", status="failed", error=str(exc.detail))
             raise
         except Exception as exc:
             self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""),
-                     extra=_exception_log_fields(exc))
-            if self.endpoint.startswith("/v1/images"):
+                     extra=_exception_log_fields(exc, image=image_request))
+            if image_request:
                 return _image_error_response(exc)
             return _protocol_error_response(exc, 502, sse)
 
@@ -912,9 +1051,14 @@ class LoggedCall:
             return _strip_internal_response_fields(result)
 
         if self.endpoint.startswith("/v1/images"):
-            sender = image_sse_stream
+            sender = lambda items: image_sse_stream(items, error_builder=_image_error_payload)
         else:
-            sender = anthropic_sse_stream if sse == "anthropic" else sse_json_stream
+            if sse == "anthropic":
+                sender = anthropic_sse_stream
+            elif image_request:
+                sender = lambda items: sse_json_stream(items, error_builder=_image_error_payload)
+            else:
+                sender = sse_json_stream
         first_item_submitted = time.perf_counter()
 
         def _next_item_with_timing():
@@ -947,15 +1091,16 @@ class LoggedCall:
             has_first, first = await run_in_threadpool(_next_item_with_timing)
         except ImageGenerationError as exc:
             self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""),
-                     conversation_id=getattr(exc, "conversation_id", ""), extra=_exception_log_fields(exc))
+                     conversation_id=getattr(exc, "conversation_id", ""),
+                     extra=_exception_log_fields(exc, image=image_request))
             return _image_error_response(exc)
         except HTTPException as exc:
             self.log("调用失败", status="failed", error=str(exc.detail))
             raise
         except Exception as exc:
             self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""),
-                     extra=_exception_log_fields(exc))
-            if self.endpoint.startswith("/v1/images"):
+                     extra=_exception_log_fields(exc, image=image_request))
+            if image_request:
                 return _image_error_response(exc)
             return _protocol_error_response(exc, 502, sse)
         if not has_first:
@@ -963,13 +1108,16 @@ class LoggedCall:
             return StreamingResponse(sender(()), media_type="text/event-stream")
         return StreamingResponse(sender(self.stream(itertools.chain([first], result))), media_type="text/event-stream")
 
-    def _trace_image_perf(self) -> bool:
-        model = str(self.model or "").strip().lower()
-        if self.endpoint.startswith("/v1/images"):
+    def _is_image_request(self) -> bool:
+        if self.image_request or self.endpoint.startswith("/v1/images"):
             return True
+        model = str(self.model or "").strip().lower()
         if self.endpoint in {"/v1/chat/completions", "/v1/responses"}:
             return "image" in model
         return False
+
+    def _trace_image_perf(self) -> bool:
+        return self._is_image_request()
 
     def attach_trace_metadata(self, body: dict[str, Any]) -> None:
         if not isinstance(body, dict):
@@ -984,15 +1132,22 @@ class LoggedCall:
         urls: list[str] = []
         account_emails: list[str] = []
         conversation_ids: list[str] = []
+        image_attempts: list[dict[str, object]] = []
         failed = False
+        image_request = self._is_image_request()
         try:
             for item in items:
                 urls.extend(_collect_urls(item))
                 account_emails.extend(_collect_account_emails(item))
                 conversation_ids.extend(_collect_conversation_ids(item))
+                image_attempts = collect_image_attempts([image_attempts, item])
                 yield _strip_internal_response_fields(item)
         except Exception as exc:
             failed = True
+            extra = _exception_log_fields(exc, image=image_request)
+            combined_attempts = collect_image_attempts([image_attempts, exc])
+            if combined_attempts:
+                extra["image_attempts"] = combined_attempts
             self.log(
                 "流式调用失败",
                 status="failed",
@@ -1000,17 +1155,24 @@ class LoggedCall:
                 urls=urls,
                 account_email=(account_emails[0] if account_emails else getattr(exc, "account_email", "")),
                 conversation_id=(conversation_ids[0] if conversation_ids else getattr(exc, "conversation_id", "")),
-                extra=_exception_log_fields(exc),
+                extra=extra,
             )
-            if self.endpoint.startswith("/v1/images") and not hasattr(exc, "to_openai_error"):
-                from services.protocol.conversation import ImageGenerationError, public_image_error_message
+            if image_request and not hasattr(exc, "to_openai_error"):
+                from services.image_failure import ImageGenerationError, classify_image_exception
 
-                raise ImageGenerationError(public_image_error_message(str(exc))) from exc
+                raw_error = str(exc) or "image generation failed"
+                raise ImageGenerationError(
+                    raw_error,
+                    failure=classify_image_exception(exc),
+                    raw_error=raw_error,
+                    upstream_error=raw_error,
+                ) from exc
             raise
         finally:
             if not failed:
+                extra = {"image_attempts": image_attempts} if image_attempts else None
                 self.log("流式调用结束", urls=urls, account_email=account_emails[0] if account_emails else "",
-                         conversation_id=conversation_ids[0] if conversation_ids else "")
+                         conversation_id=conversation_ids[0] if conversation_ids else "", extra=extra)
 
     def log(self, suffix: str, result: object = None, status: str = "success", error: str = "",
             urls: list[str] | None = None, account_email: str = "", conversation_id: str = "",
@@ -1047,6 +1209,9 @@ class LoggedCall:
                 if value in (None, ""):
                     continue
                 detail[key] = value
+        attempts = collect_image_attempts([result, extra])
+        if attempts:
+            detail["image_attempts"] = attempts
         email = str(account_email or "").strip()
         if not email:
             emails = _collect_account_emails(result)

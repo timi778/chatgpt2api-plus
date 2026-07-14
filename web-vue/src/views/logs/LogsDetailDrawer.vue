@@ -17,7 +17,7 @@
           <div class="log-detail-summary__main">
             <div class="log-detail-summary__copy">
               <div class="log-detail-summary__title-row">
-                <StateBadge :tone="statusTone(log)" shape="rounded" :bordered="false">
+                <StateBadge :tone="statusTone(log)" shape="rounded">
                   {{ statusLabel(log) }}
                 </StateBadge>
               </div>
@@ -27,7 +27,10 @@
             </div>
             <div class="log-detail-summary__duration">
               <span>总耗时</span>
-              <strong>{{ formatTimelineMs(log.durationMs) }}</strong>
+              <strong>{{ durationDisplay.total || '-' }}</strong>
+              <small v-if="durationDisplay.breakdown">
+                {{ durationDisplay.breakdown }}
+              </small>
             </div>
           </div>
         </section>
@@ -70,15 +73,20 @@
         </div>
 
         <LogsDetailTimeline
-          v-if="hasTimeline"
+          v-if="timelineSegments.length || timelineGroups.length"
           :segments="timelineSegments"
           :legend-items="timelineLegendItems"
           :groups="timelineGroups"
-          :bottleneck-step="bottleneckStep"
           :step-count="timelineStepCount"
-          :segment-total-ms="timelineSegmentTotal"
+          :duration-ms="timelineSegmentTotal"
+          :status="isSystemLogSuccess(log) ? 'success' : 'failed'"
           :details-visible="timelineDetailsVisible"
           @toggle-details="emit('toggle-timeline-details')"
+        />
+
+        <LogsImageAttemptTimeline
+          v-if="log.accountSwitchCount"
+          :attempts="log.imageAttempts"
         />
 
         <DetailTextBlock
@@ -128,39 +136,46 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
 import DetailFieldCard from '@/components/ai/DetailFieldCard.vue'
 import DetailImagePreview from '@/components/ai/DetailImagePreview.vue'
 import DetailTextBlock from '@/components/ai/DetailTextBlock.vue'
 import ModalHeader from '@/components/ai/ModalHeader.vue'
 import ModalShell from '@/components/ai/ModalShell.vue'
 import StateBadge from '@/components/ai/StateBadge.vue'
-import type { SystemLogRow } from '@/api/logs'
+import { isSystemLogSuccess, type SystemLogRow } from '@/api/logs'
 import {
-  formatTimelineMs,
   type DetailField,
   type DetailTimelineGroup,
   type DetailTimelineLegendItem,
   type DetailTimelineSegment,
-  type DetailTimelineStep,
 } from '@/views/logs/logDetailView'
 import type { DetailPreviewImage } from '@/views/logs/logDetailRuntime'
-import { statusLabel, statusTone, summaryText } from '@/views/logs/logsView'
+import {
+  logDurationDisplay,
+  statusLabel,
+  statusTone,
+  summaryText,
+} from '@/views/logs/logsView'
 import LogsDetailTimeline from '@/views/logs/LogsDetailTimeline.vue'
+import LogsImageAttemptTimeline from '@/views/logs/LogsImageAttemptTimeline.vue'
 
-defineProps<{
+const props = defineProps<{
   log: SystemLogRow | null
   primaryFields: DetailField[]
   diagnosticFields: DetailField[]
   timelineSegments: DetailTimelineSegment[]
   timelineLegendItems: DetailTimelineLegendItem[]
   timelineGroups: DetailTimelineGroup[]
-  bottleneckStep: DetailTimelineStep | null
   timelineStepCount: number
   timelineSegmentTotal: number
-  hasTimeline: boolean
   timelineDetailsVisible: boolean
   images: DetailPreviewImage[]
 }>()
+
+const durationDisplay = computed(() => (
+  props.log ? logDurationDisplay(props.log) : { total: '', breakdown: '' }
+))
 
 const emit = defineEmits<{
   (e: 'close'): void
@@ -230,6 +245,14 @@ const emit = defineEmits<{
   color: hsl(var(--foreground));
 }
 
+.log-detail-summary__duration small {
+  max-width: 24rem;
+  overflow-wrap: anywhere;
+  font-size: 10px;
+  line-height: 1.4;
+  color: hsl(var(--muted-foreground) / 0.78);
+}
+
 .detail-field-stack {
   display: flex;
   flex-direction: column;
@@ -259,7 +282,13 @@ const emit = defineEmits<{
 
 .detail-field-grid {
   display: grid;
+  grid-template-columns: minmax(4.8rem, 0.42fr) minmax(0, 1fr);
   gap: 8px;
+}
+
+.detail-field-grid > .detail-field-card--row {
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
 }
 
 .detail-field-grid--diagnostic {
@@ -270,13 +299,23 @@ const emit = defineEmits<{
   grid-column: 1 / -1;
 }
 
-.detail-field-grid > .detail-field-grid__item--wide.detail-field-card--row {
-  grid-template-columns: 4.8rem minmax(0, 1fr);
+.detail-field-grid__item--wide :deep(.detail-field-card__value) {
+  grid-column: 2 / -1;
 }
 
 @media (min-width: 640px) {
   .detail-field-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns:
+      minmax(4.8rem, 0.42fr) minmax(0, 1fr)
+      minmax(4.8rem, 0.42fr) minmax(0, 1fr);
+  }
+
+  .detail-field-grid > .detail-field-card--row {
+    grid-column: span 2;
+  }
+
+  .detail-field-grid > .detail-field-grid__item--wide.detail-field-card--row {
+    grid-column: 1 / -1;
   }
 }
 

@@ -10,8 +10,16 @@ from uuid import uuid4
 
 from services.config import DATA_DIR, config
 from services.content_filter import request_text
+from services.image_failure import (
+    ImageFailureError,
+    ImageGenerationError,
+    ImagePollTimeoutError,
+    classify_image_exception,
+    image_failure,
+    public_image_error_message,
+)
 from services.json_file import read_json_file, write_json_file
-from services.log_service import LOG_TYPE_CALL, log_service
+from services.log_service import LOG_TYPE_CALL, collect_image_attempts, log_service
 from services.protocol import openai_v1_image_edit, openai_v1_image_generations
 from services.realtime_monitor_service import realtime_monitor_service
 from utils.diagnostics import exception_diagnostic_fields
@@ -23,13 +31,25 @@ TASK_STATUS_SUCCESS = "success"
 TASK_STATUS_ERROR = "error"
 TERMINAL_STATUSES = {TASK_STATUS_SUCCESS, TASK_STATUS_ERROR}
 UNFINISHED_STATUSES = {TASK_STATUS_QUEUED, TASK_STATUS_RUNNING}
+TASK_ERROR_MESSAGE_VERSION = 1
 TASK_DETAIL_KEYS = (
     "error_code",
+    "error_message_version",
+    "failure_scope",
+    "failure_capability",
+    "failure_retryable",
+    "failure_retry_after",
+    "can_resume_poll",
+    "poll_attempts",
+    "poll_timeout_secs",
+    "stream_timeout_secs",
+)
+
+ADMIN_LOG_ONLY_TASK_DETAIL_KEYS = (
     "raw_error",
     "upstream_error",
     "upstream_error_type",
     "upstream_request_id",
-    "can_resume_poll",
     "raw_upstream_message",
     "raw_upstream_message_len",
     "raw_upstream_message_truncated",
@@ -40,10 +60,11 @@ TASK_DETAIL_KEYS = (
     "terminal_message",
     "blocked",
     "diagnosis",
-    "poll_attempts",
-    "poll_timeout_secs",
-    "stream_timeout_secs",
     "last_task_error",
+)
+
+PUBLIC_TASK_DETAIL_KEYS = (
+    "can_resume_poll",
 )
 
 
@@ -61,6 +82,22 @@ def _task_detail_fields(fields: dict[str, Any]) -> dict[str, Any]:
 
 def _clear_task_details() -> dict[str, str]:
     return {key: "" for key in TASK_DETAIL_KEYS}
+
+
+def _normalize_task_failure(
+    exc: Exception,
+    fallback: str,
+) -> tuple[str, str, dict[str, Any]]:
+    raw_error = str(exc).strip() or fallback
+    details = exception_diagnostic_fields(exc)
+    details.setdefault("raw_error", raw_error)
+    failure = classify_image_exception(exc)
+    details.update(failure.diagnostic_fields())
+    details["error_code"] = failure.code
+    details["error_message_version"] = TASK_ERROR_MESSAGE_VERSION
+    if failure.code == "image_poll_timeout" and _clean(getattr(exc, "conversation_id", "")):
+        details["can_resume_poll"] = True
+    return public_image_error_message(failure, exc), raw_error, details
 
 
 def _now_iso() -> str:
@@ -101,14 +138,22 @@ def _task_key(owner_id: str, task_id: str) -> str:
     return f"{owner_id}:{task_id}"
 
 
-def _collect_image_urls(data: list[Any]) -> list[str]:
+def _collect_image_urls(value: object) -> list[str]:
     urls: list[str] = []
-    for item in data:
-        if isinstance(item, dict):
-            url = item.get("url")
-            if isinstance(url, str) and url:
-                urls.append(url)
-    return urls
+    if isinstance(value, dict):
+        url = value.get("url")
+        if isinstance(url, str) and url.strip():
+            urls.append(url.strip())
+        image_urls = value.get("_image_urls")
+        if isinstance(image_urls, list):
+            urls.extend(str(item).strip() for item in image_urls if isinstance(item, str) and item.strip())
+        data = value.get("data")
+        if isinstance(data, list):
+            urls.extend(_collect_image_urls(data))
+    elif isinstance(value, list):
+        for item in value:
+            urls.extend(_collect_image_urls(item))
+    return list(dict.fromkeys(urls))
 
 
 def _public_task(task: dict[str, Any]) -> dict[str, Any]:
@@ -130,8 +175,17 @@ def _public_task(task: dict[str, Any]) -> dict[str, Any]:
     if task.get("usage") is not None:
         item["usage"] = task.get("usage")
     if task.get("error"):
-        item["error"] = task.get("error")
-    _copy_task_details(task, item)
+        stored_error = _clean(task.get("error"))
+        failure = image_failure(_clean(task.get("error_code")))
+        if _clean(task.get("error_message_version")) == str(TASK_ERROR_MESSAGE_VERSION):
+            item["error"] = stored_error
+        else:
+            item["error"] = public_image_error_message(failure)
+        item["error_code"] = failure.code
+    for key in PUBLIC_TASK_DETAIL_KEYS:
+        value = task.get(key)
+        if value not in (None, ""):
+            item[key] = value
     if task.get("progress"):
         item["progress"] = task.get("progress")
     if task.get("duration_ms") is not None:
@@ -163,10 +217,11 @@ class ImageTaskService:
         self.retention_days_getter = retention_days_getter or (lambda: config.image_retention_days)
         self._lock = threading.RLock()
         self._tasks: dict[str, dict[str, Any]] = {}
+        self._loaded_private_task_details = False
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._lock:
             self._tasks = self._load_locked()
-            changed = self._recover_unfinished_locked()
+            changed = self._loaded_private_task_details or self._recover_unfinished_locked()
             changed = self._cleanup_locked() or changed
             if changed:
                 self._save_locked()
@@ -345,12 +400,15 @@ class ImageTaskService:
             data = result.get("data")
             account_email = _clean(result.get("_account_email") or result.get("account_email"))
             if not isinstance(data, list) or not data:
-                upstream = _clean(result.get("message"))
-                if upstream:
-                    message = upstream
-                else:
-                    message = "号池中没有可用账号或所有账号均被限流，请检查号池状态（账号额度、是否被封禁、是否到达生图上限）"
-                error = RuntimeError(message)
+                upstream_message = _clean(result.get("message"))
+                message = upstream_message or "image task returned no image data"
+                error = ImageGenerationError(
+                    message,
+                    failure=image_failure(
+                        "no_image_generated",
+                        raw_detail=upstream_message or None,
+                    ),
+                )
                 if account_email:
                     setattr(error, "account_email", account_email)
                 raise error
@@ -365,6 +423,7 @@ class ImageTaskService:
                 duration_ms=duration_ms,
                 **_clear_task_details(),
             )
+            image_attempts = collect_image_attempts(result)
             self._log_call(
                 identity,
                 mode,
@@ -372,19 +431,19 @@ class ImageTaskService:
                 started,
                 "调用完成",
                 request_preview=request_text(payload.get("prompt")),
-                urls=_collect_image_urls(data),
+                urls=_collect_image_urls(result),
                 account_email=account_email,
                 call_id=call_id,
                 perf=perf_timings,
+                extra={"image_attempts": image_attempts} if image_attempts else None,
             )
         except Exception as exc:
             perf_timings["handler_exec_ms"] = int((time.perf_counter() - handler_started) * 1000)
-            error_message = str(exc) or "image task failed"
+            public_error, raw_error, error_details = _normalize_task_failure(exc, "image task failed")
             account_email = _clean(getattr(exc, "account_email", ""))
             conversation_id = _clean(getattr(exc, "conversation_id", ""))
-            error_details = exception_diagnostic_fields(exc)
             duration_ms = int((time.time() - started) * 1000)
-            self._update_task(key, status=TASK_STATUS_ERROR, error=error_message, data=[],
+            self._update_task(key, status=TASK_STATUS_ERROR, error=public_error, data=[],
                               duration_ms=duration_ms,
                               **({"conversation_id": conversation_id} if conversation_id else {}),
                               **_task_detail_fields(error_details))
@@ -396,7 +455,7 @@ class ImageTaskService:
                 "调用失败",
                 request_preview=request_text(payload.get("prompt")),
                 status="failed",
-                error=error_message,
+                error=raw_error,
                 account_email=account_email,
                 conversation_id=conversation_id,
                 call_id=call_id,
@@ -488,6 +547,8 @@ class ImageTaskService:
         for item in raw_items:
             if not isinstance(item, dict):
                 continue
+            if any(key in item for key in ADMIN_LOG_ONLY_TASK_DETAIL_KEYS):
+                self._loaded_private_task_details = True
             task_id = _clean(item.get("id"))
             owner = _clean(item.get("owner_id"))
             if not task_id or not owner:
@@ -517,10 +578,27 @@ class ImageTaskService:
             usage = item.get("usage")
             if isinstance(usage, dict):
                 task["usage"] = usage
-            error = _clean(item.get("error"))
-            if error:
-                task["error"] = error
             _copy_task_details(item, task)
+            if status == TASK_STATUS_ERROR:
+                stored_error = _clean(item.get("error"))
+                stored_version = _clean(item.get("error_message_version"))
+                failure = image_failure(_clean(task.get("error_code")))
+                if stored_version == str(TASK_ERROR_MESSAGE_VERSION):
+                    task["error"] = stored_error
+                else:
+                    task["error"] = public_image_error_message(failure)
+                task["error_code"] = failure.code
+                task["error_message_version"] = TASK_ERROR_MESSAGE_VERSION
+                if (
+                    stored_error != task["error"]
+                    or _clean(item.get("error_code")) != failure.code
+                    or stored_version != str(TASK_ERROR_MESSAGE_VERSION)
+                ):
+                    self._loaded_private_task_details = True
+            else:
+                error = _clean(item.get("error"))
+                if error:
+                    task["error"] = error
             tasks[_task_key(owner, task_id)] = task
         return tasks
 
@@ -532,8 +610,17 @@ class ImageTaskService:
         changed = False
         for task in self._tasks.values():
             if task.get("status") in UNFINISHED_STATUSES:
+                raw_error = "image task interrupted by service restart"
+                public_error, _, details = _normalize_task_failure(
+                    ImageFailureError(
+                        raw_error,
+                        failure=image_failure("task_interrupted", raw_detail=raw_error),
+                    ),
+                    raw_error,
+                )
                 task["status"] = TASK_STATUS_ERROR
-                task["error"] = "服务已重启，未完成的图片任务已中断"
+                task["error"] = public_error
+                _copy_task_details(details, task)
                 task["updated_at"] = _now_iso()
                 changed = True
         return changed
@@ -568,8 +655,7 @@ class ImageTaskService:
                 raise ValueError("task not found")
             if task.get("status") != TASK_STATUS_ERROR:
                 raise ValueError("task is not in error state")
-            error_msg = _clean(task.get("error"))
-            if "超时" not in error_msg:
+            if image_failure(_clean(task.get("error_code"))).code != "image_poll_timeout":
                 raise ValueError("task error is not a timeout error")
             conversation_id = _clean(task.get("conversation_id"))
             if not conversation_id:
@@ -611,7 +697,7 @@ class ImageTaskService:
                 extra_timeout_secs,
             )
             if not file_ids and not sediment_ids:
-                raise RuntimeError(
+                raise ImagePollTimeoutError(
                     f"继续等待 {extra_timeout_secs} 秒后仍未找到图片结果。"
                 )
 
@@ -630,13 +716,14 @@ class ImageTaskService:
                 task = self._tasks.get(key)
                 quality = _clean(task.get("quality"), "auto") if task else "auto"
                 size = _clean(task.get("size")) if task else None
-            data = format_image_result(
+            formatted = format_image_result(
                 image_items,
                 "",  # prompt 已不重要，结果已经拿到了
                 "b64_json",
                 "",
                 int(time.time()),
-            )["data"]
+            )
+            data = formatted["data"]
             self._update_task(
                 key,
                 status=TASK_STATUS_SUCCESS,
@@ -652,16 +739,17 @@ class ImageTaskService:
                 started,
                 "调用完成（续轮询）",
                 status="success",
-                urls=_collect_image_urls(data),
+                urls=_collect_image_urls(formatted),
             )
         except Exception as exc:
-            error_message = str(exc) or "resume poll failed"
-            error_details = exception_diagnostic_fields(exc)
+            public_error, raw_error, error_details = _normalize_task_failure(exc, "resume poll failed")
+            if error_details.get("error_code") == "image_poll_timeout" and conversation_id:
+                error_details["can_resume_poll"] = True
             duration_ms = int((time.time() - started) * 1000)
             self._update_task(
                 key,
                 status=TASK_STATUS_ERROR,
-                error=error_message,
+                error=public_error,
                 data=[],
                 duration_ms=duration_ms,
                 **_task_detail_fields(error_details),
@@ -673,7 +761,7 @@ class ImageTaskService:
                 started,
                 "调用失败（续轮询）",
                 status="failed",
-                error=error_message,
+                error=raw_error,
                 extra=error_details,
             )
         finally:

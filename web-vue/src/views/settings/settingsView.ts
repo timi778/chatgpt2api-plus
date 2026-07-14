@@ -20,21 +20,6 @@ export type SettingsApiDocItem = {
   example: string
 }
 
-export type SettingsImageErrorMessageKey = keyof Settings['image_error_messages']
-
-export type SettingsImageErrorMessageField = {
-  key: SettingsImageErrorMessageKey
-  label: string
-  placeholder: string
-  help?: string
-}
-
-export type SettingsImageErrorMessageGroup = {
-  key: string
-  title: string
-  fields: SettingsImageErrorMessageField[]
-}
-
 export type SettingsBackupIncludeKey =
   | 'config'
   | 'register'
@@ -69,7 +54,6 @@ const dateTimeFormatter = new Intl.DateTimeFormat('zh-CN', {
 
 export const settingsTabs: SettingsSelectOption[] = [
   { value: 'basic', label: '基础配置' },
-  { value: 'image-errors', label: '图片错误' },
   { value: 'storage', label: '图片存储与审核' },
   { value: 'prompts', label: '提示词源' },
   { value: 'backup', label: 'R2 备份' },
@@ -79,93 +63,6 @@ export const settingsTabs: SettingsSelectOption[] = [
   { value: 'cpa', label: 'CPA' },
   { value: 'sub2api', label: 'Sub2API' },
 ]
-
-export const imageErrorMessageGroups: SettingsImageErrorMessageGroup[] = [
-  {
-    key: 'account',
-    title: '账号与配置',
-    fields: [
-      {
-        key: 'quota',
-        label: '额度耗尽',
-        placeholder: '图片账号额度已用完，请稍后再试或联系管理员。',
-      },
-      {
-        key: 'no_account',
-        label: '无可用账号',
-        placeholder: '当前图片账号暂不可用，可能是账号池、并发或上游波动，请稍后重试。',
-      },
-      {
-        key: 'local_busy',
-        label: '本地繁忙',
-        placeholder: '当前没有可用的图片账号或账号并发已满，请稍后重试。',
-      },
-      {
-        key: 'unsupported_model',
-        label: '模型不支持',
-        placeholder: '当前模型不支持图片生成，请检查 model 参数。',
-      },
-      {
-        key: 'token_invalid',
-        label: '账号状态异常',
-        placeholder: '图片生成账号状态异常，请稍后重试。',
-      },
-    ],
-  },
-  {
-    key: 'upstream',
-    title: '上游链路',
-    fields: [
-      {
-        key: 'poll_timeout',
-        label: '轮询超时',
-        placeholder: '图片任务暂未返回结果，可能仍在排队或上游处理较慢，请重试。',
-      },
-      {
-        key: 'stream_interrupted',
-        label: '上游断流',
-        placeholder: '图片生成连接中断，可能是上游服务繁忙或网络波动，请重试。',
-      },
-      {
-        key: 'connection_failed',
-        label: '连接失败',
-        placeholder: '连接上游图片服务失败，可能是网络或代理波动，请重试。',
-      },
-      {
-        key: 'connection_timeout',
-        label: '连接超时',
-        placeholder: '连接上游图片服务超时，请稍后重试。',
-      },
-    ],
-  },
-  {
-    key: 'result',
-    title: '结果语义',
-    fields: [
-      {
-        key: 'text_reply',
-        label: '返回文本但无图',
-        placeholder: '上游返回了文本说明，未生成图片。请调整提示词或重试。',
-        help: '可使用 {text} 指定上游文本插入位置；不写占位符时会自动追加到下一行。',
-      },
-    ],
-  },
-  {
-    key: 'fallback',
-    title: '兜底',
-    fields: [
-      {
-        key: 'fallback',
-        label: '兜底错误',
-        placeholder: '图片生成请求失败，请稍后重试。',
-      },
-    ],
-  },
-]
-
-export const imageErrorMessageFields: SettingsImageErrorMessageField[] = imageErrorMessageGroups.flatMap(
-  (group) => group.fields,
-)
 
 export const logLevelOptions = ['debug', 'info', 'warning', 'error'] as const
 

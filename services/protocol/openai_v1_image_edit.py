@@ -5,6 +5,7 @@ from typing import Any, Iterator
 
 from PIL import Image
 
+from services.image_failure import image_failure
 from services.protocol.conversation import (
     ConversationRequest,
     ImageGenerationError,
@@ -62,7 +63,10 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
     progress_callback = body.get("progress_callback")
     encoded_images = encode_images(images)
     if not encoded_images:
-        raise ImageGenerationError("image is required")
+        raise ImageGenerationError(
+            "image is required",
+            failure=image_failure("invalid_image_input"),
+        )
     outputs = stream_image_outputs_with_pool(ConversationRequest(
         prompt=prompt,
         model=model,

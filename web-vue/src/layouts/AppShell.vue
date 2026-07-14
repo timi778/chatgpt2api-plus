@@ -437,7 +437,7 @@
       :open="isUpdateDialogOpen"
       max-width="42rem"
       :z-index="100"
-      panel-class="p-6"
+      panel-class="flex max-h-[min(46rem,calc(100dvh-2rem))] flex-col p-6"
       close-on-backdrop
       @close="isUpdateDialogOpen = false"
     >
@@ -467,7 +467,12 @@
               {{ isCheckingUpdate ? '检查中...' : '检查更新' }}
             </button>
           </div>
-          <p class="mt-1 text-base font-semibold text-foreground">{{ latestVersionLabel }}</p>
+          <p
+            class="mt-1 text-base font-semibold"
+            :class="hasNewVersion ? 'text-rose-600 dark:text-rose-400' : 'text-foreground'"
+          >
+            {{ latestVersionLabel }}
+          </p>
         </div>
       </div>
 
@@ -487,7 +492,7 @@
         </MetaChip>
       </div>
 
-      <div class="mt-5 max-h-[56vh] space-y-5 overflow-y-auto pr-1">
+      <div class="scrollbar-slim mt-5 min-h-0 flex-1 space-y-5 overflow-y-auto pr-2">
         <div
           v-for="release in releaseEntries"
           :key="`${release.version}-${release.date}`"
@@ -528,7 +533,18 @@
               >
                 {{ item.type }}
               </MetaChip>
-              <span class="min-w-0 flex-1 text-foreground/85">{{ item.content }}</span>
+              <span class="min-w-0 flex-1 text-foreground/85">
+                <template
+                  v-for="(segment, segmentIndex) in splitReleaseInlineCode(item.content)"
+                  :key="`${release.version}-${index}-${segmentIndex}`"
+                >
+                  <code
+                    v-if="segment.kind === 'code'"
+                    class="rounded bg-muted px-1 py-0.5 font-mono text-[0.9em] text-foreground"
+                  >{{ segment.content }}</code>
+                  <span v-else>{{ segment.content }}</span>
+                </template>
+              </span>
             </div>
           </div>
         </div>
@@ -578,7 +594,14 @@ import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import { useToast } from '@/composables/useToast'
 import { getBooleanPreference, preferenceKeys, setBooleanPreference } from '@/lib/preferences'
 import { applyThemeMode, getStoredThemeMode, setStoredThemeMode, type ThemeMode } from '@/lib/theme'
-import { isNewerVersion, normalizeVersionTag, parseChangelog, type ReleaseInfo } from '@/lib/release'
+import {
+  isNewerVersion,
+  latestReleasedVersion,
+  normalizeVersionTag,
+  parseChangelog,
+  splitReleaseInlineCode,
+  type ReleaseInfo,
+} from '@/lib/release'
 import type { Settings } from '@/types/api'
 import localVersion from '../../../VERSION?raw'
 
@@ -596,7 +619,9 @@ const isCheckingUpdate = ref(false)
 const currentVersionTag = ref(normalizeVersionTag(localVersion))
 const latestVersionTag = ref('')
 const releaseEntries = ref<ReleaseInfo[]>([])
+const releaseEntriesSource = ref<'none' | 'local' | 'remote'>('none')
 const updateCheckMessage = ref('')
+const updateCheckStatus = ref<'idle' | 'checking' | 'available' | 'current' | 'warning'>('idle')
 const currentAuthToken = ref('')
 const thirdPartyApps = ref<Settings['third_party_apps'] | null>(null)
 const themeMode = ref<ThemeMode>(getStoredThemeMode())
@@ -770,32 +795,27 @@ const apiSdkUrl = computed(() => `${apiBaseUrl.value}/v1`)
 const apiFullUrl = computed(() => `${apiBaseUrl.value}/v1/chat/completions`)
 const apiKeyDisplay = computed(() => currentAuthToken.value || '未登录')
 const currentVersionLabel = computed(() => normalizeVersionTag(currentVersionTag.value || ''))
-const latestVersionLabel = computed(() => normalizeVersionTag(latestVersionTag.value || releaseEntries.value[0]?.version || currentVersionTag.value || ''))
+const latestVersionLabel = computed(() => normalizeVersionTag(
+  latestVersionTag.value || latestReleasedVersion(releaseEntries.value) || currentVersionTag.value || '',
+))
 const versionButtonText = computed(() => currentVersionLabel.value || '版本')
 const hasNewVersion = computed(() => isNewerVersion(latestVersionLabel.value, currentVersionLabel.value))
-const updateCheckStatus = computed(() => {
-  if (isCheckingUpdate.value) return 'checking'
-  if (!updateCheckMessage.value) return 'idle'
-  if (updateCheckMessage.value.includes('失败')) return 'error'
-  if (hasNewVersion.value || updateCheckMessage.value.includes('发现新版本')) return 'available'
-  return 'current'
-})
 const updateCheckMessageClass = computed(() => {
   if (updateCheckStatus.value === 'available') return 'border-emerald-500/40 bg-emerald-500/10 text-emerald-700'
   if (updateCheckStatus.value === 'checking') return 'border-cyan-500/35 bg-cyan-500/10 text-cyan-700'
-  if (updateCheckStatus.value === 'error') return 'border-amber-500/40 bg-amber-500/10 text-amber-700'
+  if (updateCheckStatus.value === 'warning') return 'border-amber-500/40 bg-amber-500/10 text-amber-700'
   return 'border-border bg-muted/40 text-muted-foreground'
 })
 const updateCheckBadgeText = computed(() => {
   if (updateCheckStatus.value === 'available') return '可更新'
   if (updateCheckStatus.value === 'checking') return '检查中'
-  if (updateCheckStatus.value === 'error') return '检查失败'
+  if (updateCheckStatus.value === 'warning') return '部分失败'
   return '已是最新'
 })
 const updateCheckBadgeTone = computed(() => {
   if (updateCheckStatus.value === 'available') return 'success'
   if (updateCheckStatus.value === 'checking') return 'info'
-  if (updateCheckStatus.value === 'error') return 'warning'
+  if (updateCheckStatus.value === 'warning') return 'warning'
   return 'muted'
 })
 function releaseItemTone(type: string): 'default' | 'muted' | 'success' | 'warning' | 'danger' | 'info' {
@@ -937,6 +957,7 @@ function cycleThemeMode() {
 function openUpdateDialog() {
   isUpdateDialogOpen.value = true
   updateCheckMessage.value = updateCheckingMessage
+  updateCheckStatus.value = 'checking'
   void loadLocalReleaseEntries()
   void checkForUpdates(false)
 }
@@ -948,34 +969,49 @@ function openReleasePage() {
 async function checkForUpdates(showMessage = true) {
   if (isCheckingUpdate.value) return
   isCheckingUpdate.value = true
+  updateCheckStatus.value = 'checking'
   updateCheckMessage.value = updateCheckingMessage
-  try {
-    const [version, changelog] = await Promise.all([
-      fetchRemoteText(latestVersionUrl),
-      fetchRemoteText(latestChangelogUrl),
-    ])
-    latestVersionTag.value = normalizeVersionTag(version)
-    const remoteReleases = parseChangelog(changelog)
+  const [versionResult, changelogResult] = await Promise.allSettled([
+    fetchRemoteText(latestVersionUrl),
+    fetchRemoteText(latestChangelogUrl),
+  ])
+
+  if (versionResult.status === 'fulfilled') {
+    latestVersionTag.value = normalizeVersionTag(versionResult.value)
+  }
+  if (changelogResult.status === 'fulfilled') {
+    const remoteReleases = parseChangelog(changelogResult.value)
     if (remoteReleases.length) {
       releaseEntries.value = remoteReleases
+      releaseEntriesSource.value = 'remote'
     }
-    const message = isNewerVersion(latestVersionLabel.value, currentVersionLabel.value)
-      ? `发现新版本：${latestVersionLabel.value}`
-      : `当前已是最新版本：${currentVersionLabel.value || latestVersionLabel.value}`
-    updateCheckMessage.value = message
-    if (showMessage) {
-      if (isNewerVersion(latestVersionLabel.value, currentVersionLabel.value)) toast.info(message)
-      else toast.success(message)
-    }
-  } catch (error: any) {
-    updateCheckMessage.value = '云端版本检查失败，当前展示本地更新日志。'
-    if (showMessage) {
-      const detail = error?.name === 'AbortError' ? '云端版本检查超时' : error?.message
-      toast.warning(detail || '云端版本检查失败')
-    }
-  } finally {
-    isCheckingUpdate.value = false
   }
+
+  const fullySuccessful = versionResult.status === 'fulfilled' && changelogResult.status === 'fulfilled'
+  const fullyFailed = versionResult.status === 'rejected' && changelogResult.status === 'rejected'
+  const newVersionAvailable = hasNewVersion.value
+  if (fullyFailed) {
+    updateCheckStatus.value = 'warning'
+    updateCheckMessage.value = '云端版本与更新日志获取失败，当前展示本地信息。'
+  } else if (!fullySuccessful) {
+    updateCheckStatus.value = newVersionAvailable ? 'available' : 'warning'
+    updateCheckMessage.value = newVersionAvailable
+      ? `发现新版本：${latestVersionLabel.value}（部分云端信息获取失败）`
+      : '部分云端信息获取失败，已展示可用的版本信息。'
+  } else if (newVersionAvailable) {
+    updateCheckStatus.value = 'available'
+    updateCheckMessage.value = `发现新版本：${latestVersionLabel.value}`
+  } else {
+    updateCheckStatus.value = 'current'
+    updateCheckMessage.value = `当前已是最新版本：${currentVersionLabel.value || latestVersionLabel.value}`
+  }
+
+  if (showMessage) {
+    if (fullyFailed || !fullySuccessful) toast.warning(updateCheckMessage.value)
+    else if (newVersionAvailable) toast.info(updateCheckMessage.value)
+    else toast.success(updateCheckMessage.value)
+  }
+  isCheckingUpdate.value = false
 }
 
 async function fetchRemoteText(url: string) {
@@ -991,26 +1027,32 @@ async function fetchRemoteText(url: string) {
 }
 
 async function loadLocalReleaseEntries() {
-  if (releaseEntries.value.length) return
+  if (releaseEntriesSource.value !== 'none') return
   try {
     const module = await import('../../../CHANGELOG.md?raw')
-    releaseEntries.value = parseChangelog(module.default || '')
+    const localReleases = parseChangelog(module.default || '')
+    if (releaseEntriesSource.value === 'none') {
+      releaseEntries.value = localReleases
+      releaseEntriesSource.value = 'local'
+    }
   } catch {
-    releaseEntries.value = []
+    if (releaseEntriesSource.value === 'none') {
+      releaseEntries.value = []
+    }
   }
 }
 
 async function loadCurrentVersion() {
   try {
     const result = await versionApi.current()
-    currentVersionTag.value = String(result.tag || '').trim()
+    const runtimeVersion = String(result.tag || '').trim()
+    if (runtimeVersion) currentVersionTag.value = runtimeVersion
     if (!latestVersionTag.value) {
-      latestVersionTag.value = normalizeVersionTag(releaseEntries.value[0]?.version || currentVersionTag.value)
+      latestVersionTag.value = normalizeVersionTag(latestReleasedVersion(releaseEntries.value) || currentVersionTag.value)
     }
   } catch {
-    currentVersionTag.value = ''
     if (!latestVersionTag.value) {
-      latestVersionTag.value = normalizeVersionTag(releaseEntries.value[0]?.version || '')
+      latestVersionTag.value = normalizeVersionTag(latestReleasedVersion(releaseEntries.value) || currentVersionTag.value)
     }
   }
 }

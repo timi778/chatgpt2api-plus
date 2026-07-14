@@ -97,11 +97,23 @@ def completion_response(
     }
 
 
-def _with_log_metadata(payload: dict[str, Any], account_email: str = "", conversation_id: str = "") -> dict[str, Any]:
+def _with_log_metadata(
+    payload: dict[str, Any],
+    account_email: str = "",
+    conversation_id: str = "",
+    image_urls: Iterable[str] | None = None,
+    image_attempts: Iterable[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     if account_email:
         payload["_account_email"] = account_email
     if conversation_id:
         payload["_conversation_id"] = conversation_id
+    urls = [str(url).strip() for url in image_urls or [] if str(url).strip()]
+    if urls:
+        payload["_image_urls"] = list(dict.fromkeys(urls))
+    attempts = [dict(item) for item in image_attempts or [] if isinstance(item, dict)]
+    if attempts:
+        payload["_image_attempts"] = attempts
     return payload
 
 
@@ -239,6 +251,7 @@ def image_chat_response(body: dict[str, Any]) -> dict[str, Any]:
         response_format="b64_json",
         images=encode_images(images) or None,
         base_url=base_url,
+        message_as_error=True,
         call_id=str(body.get("_call_id") or ""),
         trace_image_perf=bool(body.get("_trace_image_perf")),
     )))
@@ -253,6 +266,8 @@ def image_chat_response(body: dict[str, Any]) -> dict[str, Any]:
         response,
         str(result.get("_account_email") or ""),
         str(result.get("_conversation_id") or ""),
+        result.get("_image_urls") if isinstance(result.get("_image_urls"), list) else None,
+        result.get("_image_attempts") if isinstance(result.get("_image_attempts"), list) else None,
     )
     return response
 
@@ -266,6 +281,7 @@ def image_chat_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
         response_format="b64_json",
         images=encode_images(images) or None,
         base_url=base_url,
+        message_as_error=True,
         call_id=str(body.get("_call_id") or ""),
         trace_image_perf=bool(body.get("_trace_image_perf")),
     ))
@@ -294,12 +310,16 @@ def stream_image_chat_completion(image_outputs: Iterable[ImageOutput], model: st
                 completion_chunk(model, {"role": "assistant", "content": content}, None, completion_id, created),
                 output.account_email,
                 output.conversation_id,
+                output.image_urls,
+                output.image_attempts,
             )
         else:
             yield _with_log_metadata(
                 completion_chunk(model, {"content": content}, None, completion_id, created),
                 output.account_email,
                 output.conversation_id,
+                output.image_urls,
+                output.image_attempts,
             )
     if not sent_role:
         yield completion_chunk(model, {"role": "assistant", "content": ""}, None, completion_id, created)

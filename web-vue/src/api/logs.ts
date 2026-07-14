@@ -119,6 +119,22 @@ export type LogDiagnosisChip = {
   tone: 'neutral' | 'success' | 'warning' | 'danger' | 'info'
 }
 
+export type ImageAttempt = {
+  slot: number
+  attempt: number
+  accountEmail: string
+  status: string
+  failureCode: string
+  conversationId: string
+  durationMs: number
+  monitor: ImageAttemptMonitor
+}
+
+export type ImageAttemptMonitor = {
+  metrics: Record<string, number>
+  events: Array<Record<string, string | number>>
+}
+
 export type SystemLogRow = {
   id: string
   raw: SystemLog
@@ -166,6 +182,8 @@ export type SystemLogRow = {
   rawUpstreamError: string
   urls: string[]
   imageUrls: string[]
+  imageAttempts: ImageAttempt[]
+  accountSwitchCount: number
   diagnosisChips: LogDiagnosisChip[]
   preview: string
   rawJson: string
@@ -177,6 +195,52 @@ export type NormalizeSystemLogRowOptions = {
 
 function cleanString(value: unknown): string {
   return String(value || '').trim()
+}
+
+const RATE_LIMIT_FAILURE_CODES = new Set([
+  '429',
+  'file_upload_throttled',
+  'image_quota_exhausted',
+  'insufficient_quota',
+  'limited',
+  'quota_exhausted',
+  'rate_limit',
+  'rate_limited',
+  'upstream_rate_limited',
+  '限流',
+])
+
+const IMAGE_FAILURE_LABELS: Record<string, string> = {
+  upstream_error: '上游请求失败',
+  internal_error: '内部处理异常',
+  upstream_unavailable: '上游服务暂不可用',
+  upstream_connection_failed: '无法连接上游',
+  upstream_connection_timeout: '上游连接超时',
+  upstream_rate_limited: '上游服务限流',
+  image_poll_timeout: '等待图片结果超时',
+  image_stream_timeout: '上游图片流超时',
+  image_stream_interrupted: '上游图片流中断',
+  image_tool_error: '图片工具异常',
+  image_quota_exhausted: '图片额度已用尽',
+  file_upload_throttled: '参考图上传受限',
+  auth_invalid: '账号登录态失效',
+  content_policy_violation: '内容安全策略拒绝',
+  invalid_image_input: '图片输入无效',
+  upstream_text_reply: '上游仅返回文本',
+  no_image_generated: '未生成图片',
+  unsupported_model: '模型不支持生图',
+  image_download_failed: '图片下载失败',
+  task_interrupted: '图片任务被中断',
+  no_available_account: '暂无可用账号',
+  insufficient_quota: '图片额度不足',
+}
+
+export function isRateLimitFailureCode(value: unknown): boolean {
+  return RATE_LIMIT_FAILURE_CODES.has(cleanString(value).toLowerCase())
+}
+
+export function imageFailureLabel(value: unknown): string {
+  return IMAGE_FAILURE_LABELS[cleanString(value).toLowerCase()] || ''
 }
 
 function formatDetailValue(value: unknown): string {
@@ -202,7 +266,7 @@ function normalizeLevel(item: SystemLog): LogEntry['level'] {
   const detail = item.detail || {}
   const status = cleanString(detail.status).toLowerCase()
   const error = cleanString(detail.error)
-  const errorCode = cleanString(detail.error_code || detail?.diagnosis?.error_code)
+  const errorCode = structuredFailureCode(detail)
   if (status === 'failed' || error || errorCode) return 'ERROR'
   if (status === 'warning' || status === 'limited') return 'WARNING'
   return 'INFO'
@@ -253,6 +317,10 @@ function detailRawValue(detail: Record<string, any>, key: string): unknown {
     return diagnosis[key]
   }
   return undefined
+}
+
+function structuredFailureCode(detail: Record<string, any>): string {
+  return cleanString(detailValue(detail, 'error_code') || detailValue(detail, 'failure_code')).toLowerCase()
 }
 
 function collectUrls(value: unknown): string[] {
@@ -311,12 +379,18 @@ export function summarizeLogText(value: string, max = 220): string {
   return `${clean.slice(0, max - 1)}…`
 }
 
-export function formatLogDuration(value: string): string {
+function compactDurationNumber(value: number, digits: number): string {
+  return Number(value.toFixed(digits)).toString()
+}
+
+export function formatLogDuration(value: unknown): string {
+  if (value === '' || value === null || value === undefined) return ''
   const parsed = Number(value)
   if (!Number.isFinite(parsed) || parsed < 0) return ''
   if (parsed < 1000) return `${Math.round(parsed)}ms`
-  if (parsed < 10000) return `${(parsed / 1000).toFixed(2)}s`
-  return `${(parsed / 1000).toFixed(1)}s`
+  if (parsed < 10000) return `${compactDurationNumber(parsed / 1000, 2)}s`
+  if (parsed < 60000) return `${compactDurationNumber(parsed / 1000, 1)}s`
+  return `${compactDurationNumber(parsed / 60000, 1)}m`
 }
 
 function boolDetailLabel(value: unknown): string {
@@ -381,13 +455,15 @@ export function normalizeSystemLogRow(item: SystemLog, index: number, options: N
   const preview = summarizeLogText(requestText || rawUpstreamMessage || upstreamPreview || error || rawUpstreamError || reason || summary)
   const urls = collectUrls(detail)
   const imageUrls = normalizePreviewUrls(urls, options.apiBaseUrl)
+  const imageAttempts = normalizeImageAttempts(detailRawValue(detail, 'image_attempts'))
+  const accountSwitchCount = imageAccountSwitchCount(imageAttempts)
   const status = detailValue(detail, 'status')
   const durationMs = detailValue(detail, 'duration_ms')
   const statusCode = detailValue(detail, 'status_code')
   const startedAt = detailValue(detail, 'started_at')
   const endedAt = detailValue(detail, 'ended_at')
   const requestShape = detailValue(detail, 'request_shape')
-  const errorCode = detailValue(detail, 'error_code')
+  const errorCode = structuredFailureCode(detail)
   const stage = detailValue(detail, 'stage')
   const upstreamErrorType = detailValue(detail, 'upstream_error_type')
   const upstreamRequestId = detailValue(detail, 'upstream_request_id')
@@ -444,6 +520,8 @@ export function normalizeSystemLogRow(item: SystemLog, index: number, options: N
     rawUpstreamError,
     urls,
     imageUrls,
+    imageAttempts,
+    accountSwitchCount,
     diagnosisChips: buildSystemLogDiagnosisChips({
       status,
       durationMs,
@@ -473,14 +551,16 @@ export function isSystemLogSuccess(item: SystemLogRow): boolean {
 }
 
 export function isSystemLogLimited(item: SystemLogRow): boolean {
-  const text = [item.status, item.errorCode, item.reason, item.error].join(' ').toLowerCase()
-  return text.includes('limit') || text.includes('quota') || text.includes('受限') || text.includes('限流')
+  const status = item.status.toLowerCase()
+  return status === 'limited' || status === 'rate_limited' || status === '限流'
+    || isRateLimitFailureCode(item.errorCode)
 }
 
 function summarizeDetail(detail: Record<string, any>) {
+  const failureCode = structuredFailureCode(detail)
   const parts = [
     detailValue(detail, 'stage') ? `stage=${detailValue(detail, 'stage')}` : '',
-    detailValue(detail, 'error_code') ? `error_code=${detailValue(detail, 'error_code')}` : '',
+    failureCode ? `error_code=${failureCode}` : '',
     detailValue(detail, 'reason') ? `reason=${detailValue(detail, 'reason')}` : '',
     detailValue(detail, 'conversation_id') ? `conversation=${detailValue(detail, 'conversation_id')}` : '',
     detailValue(detail, 'duration_ms') ? `duration_ms=${detailValue(detail, 'duration_ms')}` : '',
@@ -537,7 +617,7 @@ function mapLog(item: SystemLog, index: number): LogEntry {
     layer: endpoint ? 'reverse' : 'system',
     lane: '',
     model,
-    kind: detailValue(detail, 'error_code') || (error ? 'upstream_error' : ''),
+    kind: structuredFailureCode(detail) || (error ? 'upstream_error' : ''),
     stage: terminalStage(status, error),
     served_label: '',
   }
@@ -668,16 +748,13 @@ function buildSystemStatsFallback(items: SystemLog[]) {
   const isFailed = (item: SystemLog) => {
     const detail = item.detail || {}
     return cleanString(detailValue(detail, 'status')).toLowerCase() === 'failed'
-      || Boolean(detailValue(detail, 'error') || detailValue(detail, 'error_code'))
+      || Boolean(detailValue(detail, 'error') || structuredFailureCode(detail))
   }
   const isLimited = (item: SystemLog) => {
     const detail = item.detail || {}
-    return [
-      detailValue(detail, 'status'),
-      detailValue(detail, 'error_code'),
-      detailValue(detail, 'reason'),
-      detailValue(detail, 'error'),
-    ].join(' ').toLowerCase().includes('limit')
+    const status = cleanString(detailValue(detail, 'status')).toLowerCase()
+    return status === 'limited' || status === 'rate_limited' || status === '限流'
+      || isRateLimitFailureCode(structuredFailureCode(detail))
   }
   return {
     total: items.length,
@@ -689,6 +766,63 @@ function buildSystemStatsFallback(items: SystemLog[]) {
       return isImageEndpointLog(detailValue(detail, 'endpoint'), detailValue(detail, 'model'))
     }).length,
   }
+}
+
+function normalizeNonNegativeNumber(value: unknown): number {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.round(parsed) : 0
+}
+
+function normalizeImageAttemptMonitor(value: unknown): ImageAttemptMonitor {
+  const monitor = value && typeof value === 'object' ? value as Record<string, unknown> : {}
+  const rawMetrics = monitor.metrics && typeof monitor.metrics === 'object'
+    ? monitor.metrics as Record<string, unknown>
+    : {}
+  const metrics = Object.fromEntries(
+    Object.entries(rawMetrics)
+      .filter(([key]) => key.endsWith('_ms'))
+      .map(([key, item]) => [key, normalizeNonNegativeNumber(item)] as const)
+      .filter(([, item]) => item > 0),
+  )
+  const rawEvents = Array.isArray(monitor.events) ? monitor.events : []
+  const events = rawEvents
+    .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object'))
+    .slice(-40)
+    .map((item) => Object.fromEntries(
+      Object.entries(item)
+        .filter(([key]) => ['time', 'event', 'label', 'status'].includes(key) || key.endsWith('_ms'))
+        .map(([key, eventValue]) => [
+          key,
+          key.endsWith('_ms') ? normalizeNonNegativeNumber(eventValue) : cleanString(eventValue),
+        ]),
+    ))
+  return { metrics, events }
+}
+
+function normalizeImageAttempts(value: unknown): ImageAttempt[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object'))
+    .map((item) => ({
+      slot: Math.max(1, normalizeNonNegativeNumber(item.slot)),
+      attempt: Math.max(1, normalizeNonNegativeNumber(item.attempt)),
+      accountEmail: cleanString(item.account_email),
+      status: cleanString(item.status).toLowerCase(),
+      failureCode: cleanString(item.failure_code).toLowerCase(),
+      conversationId: cleanString(item.conversation_id),
+      durationMs: normalizeNonNegativeNumber(item.duration_ms),
+      monitor: normalizeImageAttemptMonitor(item.monitor),
+    }))
+    .filter((item) => Boolean(item.status))
+    .sort((left, right) => left.slot - right.slot || left.attempt - right.attempt)
+}
+
+export function imageAccountSwitchCount(attempts: ImageAttempt[]): number {
+  const attemptsPerSlot = new Map<number, number>()
+  attempts.forEach((attempt) => {
+    attemptsPerSlot.set(attempt.slot, (attemptsPerSlot.get(attempt.slot) || 0) + 1)
+  })
+  return Array.from(attemptsPerSlot.values()).reduce((total, count) => total + Math.max(0, count - 1), 0)
 }
 
 function normalizeSystemResponse(response: BackendLogsResponse): SystemLogsResponse {

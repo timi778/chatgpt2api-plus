@@ -28,6 +28,7 @@ const props = withDefaults(defineProps<{
 const chipClass = computed(() => [
   'state-badge',
   `state-badge--size-${props.size}`,
+  props.shape === 'rounded' ? '!rounded-md' : '!rounded-full',
   props.bordered ? '' : '!border-transparent',
 ].filter(Boolean).join(' '))
 </script>

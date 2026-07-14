@@ -158,7 +158,7 @@
                 <span class="min-w-0">
                   <span class="block truncate text-sm text-foreground">{{ account.email || account.name || account.id }}</span>
                   <span class="block truncate text-xs text-muted-foreground">
-                    {{ account.plan_type || '-' }} · {{ account.status || '-' }} · {{ account.has_access_token ? '有 access token' : '需导出 token' }}
+                    {{ account.plan_type || '未知' }} · {{ account.status || '-' }} · {{ account.has_access_token ? '有 access token' : '需导出 token' }}
                   </span>
                 </span>
                 <Checkbox

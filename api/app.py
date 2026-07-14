@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse
 from api import accounts, ai, image_tasks, prompts, register, system
 from api.errors import install_exception_handlers
 from api.support import resolve_web_asset, start_limited_account_watcher
+from services.account_service import account_service
 from services.backup_service import backup_service
 from services.config import config
 from services.dashboard_metrics_service import dashboard_metrics_service
@@ -52,6 +53,7 @@ def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         _configure_threadpool()
+        account_service.cleanup_auto_remove_accounts()
         stop_event = Event()
         thread = start_limited_account_watcher(stop_event)
         cleanup_thread = start_image_cleanup_scheduler(stop_event)
@@ -91,13 +93,8 @@ def create_app() -> FastAPI:
     @app.api_route("/{full_path:path}", methods=["GET", "HEAD"], include_in_schema=False)
     async def serve_web(full_path: str):
         asset = resolve_web_asset(full_path)
-        if asset is not None:
-            return FileResponse(asset)
-        if full_path.strip("/").startswith("_next/"):
+        if asset is None:
             raise HTTPException(status_code=404, detail="Not Found")
-        fallback = resolve_web_asset("")
-        if fallback is None:
-            raise HTTPException(status_code=404, detail="Not Found")
-        return FileResponse(fallback)
+        return FileResponse(asset)
 
     return app

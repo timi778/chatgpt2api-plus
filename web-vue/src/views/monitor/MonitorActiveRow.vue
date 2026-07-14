@@ -8,7 +8,7 @@
       <MetaChip size="xs" tone="muted">{{ row.model || '-' }}</MetaChip>
     </td>
     <td>
-      <StateBadge tone="info" shape="rounded" :bordered="false">
+      <StateBadge tone="info" shape="rounded">
         {{ row.stage_label || row.stage || '运行中' }}
       </StateBadge>
     </td>

@@ -1,6 +1,13 @@
 import { reactive, ref } from 'vue'
 
-import { accountsApi, normalizeAccountBackendStatus, type Account, type AccountBackendStatus } from '@/api/accounts'
+import {
+  accountsApi,
+  normalizeAccountBackendStatus,
+  normalizeAccountSourceType,
+  type Account,
+  type AccountBackendStatus,
+  type AccountSourceType,
+} from '@/api/accounts'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import { useToast } from '@/composables/useToast'
 
@@ -8,7 +15,7 @@ export type AccountForm = {
   id: string
   access_token: string
   type: string
-  source_type: string
+  source_type: AccountSourceType
   group_id: string
   proxy: string
   quota: string
@@ -33,7 +40,7 @@ function createDefaultForm(): AccountForm {
   return {
     id: '',
     access_token: '',
-    type: 'free',
+    type: '',
     source_type: 'web',
     group_id: '',
     proxy: '',
@@ -81,8 +88,8 @@ export function useAccountCrudRuntime(options: AccountCrudRuntimeOptions) {
     editingId.value = item.id
     form.id = item.id
     form.access_token = item.access_token || ''
-    form.type = item.type || 'free'
-    form.source_type = item.source_type || 'web'
+    form.type = item.type || ''
+    form.source_type = normalizeAccountSourceType(item.source_type)
     form.group_id = item.group_id || ''
     form.proxy = item.proxy || ''
     form.quota = item.image_quota_unknown ? '' : String(item.quota ?? '')
@@ -112,8 +119,8 @@ export function useAccountCrudRuntime(options: AccountCrudRuntimeOptions) {
       await accountsApi.upsert({
         id: payloadId,
         access_token: form.access_token.trim(),
-        type: form.type.trim() || undefined,
-        source_type: form.source_type.trim() || undefined,
+        type: form.type.trim(),
+        source_type: form.source_type,
         group_id: form.group_id.trim(),
         proxy: form.proxy.trim(),
         quota: normalizeQuota(form.quota),

@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import atexit
 import copy
+import os
 import re
 import threading
+from contextlib import contextmanager
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from services.config import DATA_DIR
+from services.image_failure import is_rate_limit_failure_code, is_structured_failure
 from services.json_file import read_json_object, write_json_file
 from utils.log import logger
 from utils.timezone import beijing_now, parse_to_beijing_naive
@@ -116,24 +120,82 @@ def _merge_bucket(target: dict[str, Any], source: dict[str, Any]) -> None:
             target_map[str(name)] = target_map.get(str(name), 0) + numeric
 
 
+def _empty_metrics_data() -> dict[str, Any]:
+    return {"version": 1, "days": {}}
+
+
+def _merge_metrics_data(target: dict[str, Any], source: dict[str, Any]) -> None:
+    target_days = target.setdefault("days", {})
+    source_days = source.get("days") if isinstance(source.get("days"), dict) else {}
+    for day_key, source_day in source_days.items():
+        if not isinstance(source_day, dict):
+            continue
+        target_day = target_days.setdefault(str(day_key), _empty_bucket())
+        if not isinstance(target_day, dict):
+            target_day = _empty_bucket()
+            target_days[str(day_key)] = target_day
+        _merge_bucket(target_day, source_day)
+
+        target_hours = target_day.get("hours")
+        if not isinstance(target_hours, dict):
+            target_hours = {}
+            target_day["hours"] = target_hours
+        source_hours = source_day.get("hours") if isinstance(source_day.get("hours"), dict) else {}
+        for hour_key, source_hour in source_hours.items():
+            if not isinstance(source_hour, dict):
+                continue
+            target_hour = target_hours.setdefault(str(hour_key), _empty_bucket())
+            if not isinstance(target_hour, dict):
+                target_hour = _empty_bucket()
+                target_hours[str(hour_key)] = target_hour
+            _merge_bucket(target_hour, source_hour)
+
+
+@contextmanager
+def _metrics_file_lock(path: Path):
+    lock_path = path.with_name(f"{path.name}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as lock_file:
+        if os.name == "nt":
+            import msvcrt
+
+            lock_file.seek(0, os.SEEK_END)
+            if lock_file.tell() == 0:
+                lock_file.write(b"\0")
+                lock_file.flush()
+            lock_file.seek(0)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
 class DashboardMetricsService:
     """Rolling dashboard aggregates independent from call-log retention."""
 
     def __init__(self, path=DASHBOARD_METRICS_FILE):
-        self.path = path
+        self.path = Path(path)
         self._lock = threading.RLock()
-        self._data: dict[str, Any] | None = None
+        self._pending = _empty_metrics_data()
         self._dirty = False
         self._flush_timer: threading.Timer | None = None
 
-    def _load(self) -> dict[str, Any]:
-        if self._data is None:
-            data = read_json_object(self.path, name="dashboard_metrics.json")
-            if not isinstance(data.get("days"), dict):
-                data["days"] = {}
-            data["version"] = 1
-            self._data = data
-        return self._data
+    def _load_persisted(self) -> dict[str, Any]:
+        data = read_json_object(self.path, name="dashboard_metrics.json")
+        if not isinstance(data.get("days"), dict):
+            data["days"] = {}
+        data["version"] = 1
+        return data
 
     def _save(self, data: dict[str, Any]) -> None:
         data["version"] = 1
@@ -183,16 +245,20 @@ class DashboardMetricsService:
             self._flush_timer = None
             if timer is not None and timer is not threading.current_thread():
                 timer.cancel()
-            if self._data is None or not self._dirty:
+            if not self._dirty:
                 return
-            self._prune(self._data)
             try:
-                self._save(self._data)
+                with _metrics_file_lock(self.path):
+                    data = self._load_persisted()
+                    _merge_metrics_data(data, self._pending)
+                    self._prune(data)
+                    self._save(data)
             except Exception:
                 self._dirty = True
                 self._schedule_flush_locked()
                 raise
             else:
+                self._pending = _empty_metrics_data()
                 self._dirty = False
 
     @staticmethod
@@ -200,13 +266,20 @@ class DashboardMetricsService:
         status = _clean_text(_detail_value(item, "status", item.get("status"))).lower()
         endpoint = _clean_text(_detail_value(item, "endpoint"))
         model = _clean_text(_detail_value(item, "model"))
-        error_code = _clean_text(_detail_value(item, "error_code"))
-        is_failed = status in {"failed", "error", "fail"} or bool(_detail_value(item, "error"))
+        error_code = _clean_text(
+            _detail_value(item, "error_code", _detail_value(item, "failure_code"))
+        ).lower()
+        is_failed = is_structured_failure(
+            status=status,
+            error=_detail_value(item, "error"),
+            error_code=_detail_value(item, "error_code"),
+            failure_code=_detail_value(item, "failure_code"),
+        )
 
         bucket["total"] = int(bucket.get("total", 0) or 0) + 1
         if is_failed:
             bucket["failed"] = int(bucket.get("failed", 0) or 0) + 1
-            if error_code in {"rate_limited", "rate_limit", "429"}:
+            if is_rate_limit_failure_code(error_code) or is_rate_limit_failure_code(status):
                 bucket["rate_limited"] = int(bucket.get("rate_limited", 0) or 0) + 1
         else:
             bucket["success"] = int(bucket.get("success", 0) or 0) + 1
@@ -229,46 +302,48 @@ class DashboardMetricsService:
         if error_code:
             _increment(bucket.setdefault("by_error_code", {}), error_code)
 
+    @classmethod
+    def _apply_call_to_data(cls, data: dict[str, Any], item: dict[str, Any], dt: datetime) -> None:
+        days = data.setdefault("days", {})
+        day_key = dt.strftime("%Y-%m-%d")
+        hour_key = dt.strftime("%H")
+        day = days.setdefault(day_key, _empty_bucket())
+        hours = day.setdefault("hours", {})
+        hour = hours.setdefault(hour_key, _empty_bucket())
+        cls._apply_call(day, item)
+        cls._apply_call(hour, item)
+
     def record_call_log(self, item: dict[str, Any]) -> None:
         dt = _parse_log_time(_call_started_at(item))
         if dt is None:
             return
         with self._lock:
-            data = self._load()
-            self._prune(data)
-            days = data.setdefault("days", {})
-            day_key = dt.strftime("%Y-%m-%d")
-            hour_key = dt.strftime("%H")
-            day = days.setdefault(day_key, _empty_bucket())
-            hours = day.setdefault("hours", {})
-            hour = hours.setdefault(hour_key, _empty_bucket())
-            self._apply_call(day, item)
-            self._apply_call(hour, item)
+            self._apply_call_to_data(self._pending, item, dt)
             self._mark_dirty_locked()
 
     def backfill_if_empty(self, items: list[dict[str, Any]]) -> None:
         with self._lock:
-            data = self._load()
-            days = data.get("days") if isinstance(data.get("days"), dict) else {}
-            if days:
+            pending_days = self._pending.get("days") if isinstance(self._pending.get("days"), dict) else {}
+            if pending_days:
                 return
-            self._prune(data)
-            for item in reversed(items):
-                if not isinstance(item, dict):
-                    continue
-                dt = _parse_log_time(_call_started_at(item))
-                if dt is None:
-                    continue
-                day_key = dt.strftime("%Y-%m-%d")
-                hour_key = dt.strftime("%H")
-                days = data.setdefault("days", {})
-                day = days.setdefault(day_key, _empty_bucket())
-                hours = day.setdefault("hours", {})
-                hour = hours.setdefault(hour_key, _empty_bucket())
-                self._apply_call(day, item)
-                self._apply_call(hour, item)
-            self._prune(data)
-            self._mark_dirty_locked()
+            with _metrics_file_lock(self.path):
+                data = self._load_persisted()
+                changed = self._prune(data)
+                days = data.get("days") if isinstance(data.get("days"), dict) else {}
+                if days:
+                    if changed:
+                        self._save(data)
+                    return
+                for item in reversed(items):
+                    if not isinstance(item, dict):
+                        continue
+                    dt = _parse_log_time(_call_started_at(item))
+                    if dt is None:
+                        continue
+                    self._apply_call_to_data(data, item, dt)
+                changed = self._prune(data) or changed
+                if changed or data.get("days"):
+                    self._save(data)
 
     def summary(self, time_range: str = "24h") -> dict[str, Any]:
         bucket_count = {"24h": 24, "7d": 7, "30d": 30}.get(time_range, 24)
@@ -284,7 +359,9 @@ class DashboardMetricsService:
         labels = [start.strftime(bucket_format) for start in starts]
 
         with self._lock:
-            data = self._load()
+            with _metrics_file_lock(self.path):
+                data = self._load_persisted()
+            _merge_metrics_data(data, self._pending)
             if self._prune(data):
                 self._mark_dirty_locked()
             raw_days = data.get("days") if isinstance(data.get("days"), dict) else {}

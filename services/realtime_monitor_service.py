@@ -7,7 +7,6 @@ from collections import Counter, deque
 from threading import Lock
 from typing import Any
 
-from services.request_cancel_service import request_cancel_service
 from utils.timezone import beijing_from_timestamp, beijing_now_str
 
 
@@ -68,19 +67,18 @@ STAGE_LABELS = {
     "image_starting_generation": "等待上游首包",
     "image_generating": "上游生成中",
     "image_stream_failed": "上游断流",
+    "image_cross_account_retry": "切换账号",
     "image_egress_fallback_retry": "切换备用出口",
-    "image_stream_resolve_start": "解析上游结果",
-    "image_resolve_done": "解析图片",
-    "image_resolve_failed": "解析失败",
+    "image_stream_resolve_start": "等待图片结果",
+    "image_resolve_done": "图片地址就绪",
+    "image_resolve_failed": "结果获取失败",
     "image_text_reply": "上游文本回复",
     "image_download_done": "下载图片",
     "image_download_failed": "下载失败",
-    "image_retry_wait": "重试等待",
     "image_codex_response_done": "Codex 响应",
     "image_single_stream_done": "生成返回",
     "image_single_done": "单图完成",
     "image_local_rejected": "本地拒绝/繁忙",
-    "image_cancelled": "手动终止",
     "completed": "完成",
     "failed": "失败",
 }
@@ -102,16 +100,15 @@ ACTIVE_STAGE_GROUPS = {
     "image_starting_generation": "上游准备",
     "image_generating": "上游生成中",
     "image_stream_failed": "上游断流",
+    "image_cross_account_retry": "切换账号",
     "image_egress_fallback_retry": "等待出口",
-    "image_stream_resolve_start": "解析/轮询",
-    "image_resolve_done": "解析/轮询",
-    "image_resolve_failed": "解析/轮询",
+    "image_stream_resolve_start": "等待图片结果",
+    "image_resolve_done": "获取图片地址",
+    "image_resolve_failed": "获取图片地址",
     "image_text_reply": "上游文本回复",
     "image_download_done": "下载图片",
     "image_download_failed": "下载图片",
-    "image_retry_wait": "重试等待",
     "image_local_rejected": "本地拒绝/繁忙",
-    "image_cancelled": "手动终止",
 }
 
 
@@ -138,26 +135,14 @@ METRIC_LABELS = {
     "sse_stream_ms": "SSE 流耗时",
     "conversation_stream_ms": "上游生成中",
     "stream_error_ms": "上游断流",
-    "resolve_ms": "图片解析",
+    "poll_wait_ms": "等待图片结果",
+    "poll_request_ms": "查询图片结果",
+    "resolve_ms": "结果处理",
     "download_ms": "图片下载",
-    "retry_wait_ms": "重试等待",
     "response_ms": "Codex 响应",
     "stream_ms": "单图生成流",
     "total_ms": "单图总耗时",
 }
-
-
-LOCAL_REJECT_PATTERNS = (
-    "image_account_selection:",
-    "no available image quota",
-    "no account in the pool",
-    "unsupported image model",
-    "rate-limit status",
-    "account concurrency",
-    "image quota",
-    "server busy",
-    "local busy",
-)
 
 
 class RealtimeMonitorService:
@@ -259,7 +244,6 @@ class RealtimeMonitorService:
         call_id = str(detail.get("call_id") or "").strip()
         if not call_id:
             return
-        request_cancel_service.clear(call_id)
         status = str(detail.get("status") or "success").strip().lower() or "success"
         with self._lock:
             record = self._active.pop(call_id, None)
@@ -307,7 +291,9 @@ class RealtimeMonitorService:
             perf = detail.get("perf")
             if isinstance(perf, dict):
                 self._merge_metric_dict(record.setdefault("perf", {}), perf)
-            events = [dict(item) for item in self._events if item.get("call_id") == call_id][-60:]
+            all_events = [dict(item) for item in self._events if item.get("call_id") == call_id]
+            self._attach_image_attempt_monitors(detail, all_events)
+            events = all_events[-60:]
             diagnostic = self._detail_diagnostic(record, events)
             if diagnostic:
                 detail["monitor"] = diagnostic
@@ -342,36 +328,12 @@ class RealtimeMonitorService:
             item = self._copy_record(record)
             events = [dict(event) for event in self._events if event.get("call_id") == call_id][-100:]
         now = time.time()
-        if str(item.get("status") or "").lower() in {"running", "cancelling"}:
+        if str(item.get("status") or "").lower() == "running":
             item["elapsed_ms"] = _int_ms((now - float(item.get("started_ts") or now)) * 1000)
             item["stage_elapsed_ms"] = _int_ms((now - float(item.get("stage_started_ts") or now)) * 1000)
         item = self._public_record(item)
         item["events"] = events
-        item["cancelled"] = bool(item.get("cancel_requested_at")) or request_cancel_service.is_cancelled(call_id)
         return item
-
-    def cancel(self, call_id: str) -> dict[str, Any]:
-        call_id = str(call_id or "").strip()
-        if not call_id:
-            return {"ok": False, "error": "call_id is required"}
-        with self._lock:
-            record = self._active.get(call_id)
-            if record is None:
-                return {"ok": False, "error": "request is not active"}
-            request_cancel_service.cancel(call_id)
-            now = time.time()
-            record["status"] = "cancelling"
-            record["stage"] = "image_cancelled"
-            record["stage_label"] = STAGE_LABELS["image_cancelled"]
-            record["updated_at"] = beijing_now_str()
-            record["cancel_requested_at"] = record["updated_at"]
-            record["stage_started_ts"] = now
-            self._events.append(self._event(call_id, "image_cancelled", record, {"status": "cancelling"}))
-            item = self._copy_record(record)
-        now = time.time()
-        item["elapsed_ms"] = _int_ms((now - float(item.get("started_ts") or now)) * 1000)
-        item["stage_elapsed_ms"] = _int_ms((now - float(item.get("stage_started_ts") or now)) * 1000)
-        return {"ok": True, "record": self._public_record(item)}
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -486,6 +448,65 @@ class RealtimeMonitorService:
             ms = _int_ms(value)
             target[key] = max(_int_ms(target.get(key)), ms)
 
+    def _attach_image_attempt_monitors(
+        self,
+        detail: dict[str, Any],
+        events: list[dict[str, Any]],
+    ) -> None:
+        attempts = detail.get("image_attempts")
+        if not isinstance(attempts, list):
+            return
+
+        snapshots: dict[tuple[int, int], dict[str, Any]] = {}
+        for event in events:
+            slot = _int_ms(event.get("index"))
+            attempt_number = _int_ms(event.get("attempt"))
+            if slot <= 0 or attempt_number <= 0:
+                continue
+            snapshot = snapshots.setdefault(
+                (slot, attempt_number),
+                {"metrics": {}, "events": []},
+            )
+            metric_data = {
+                key: value
+                for key, value in event.items()
+                if str(key).endswith("_ms")
+            }
+            self._merge_metric_dict(snapshot["metrics"], metric_data)
+            compact_event = {
+                key: value
+                for key, value in event.items()
+                if key in {"time", "event", "label", "status"}
+                or (str(key).endswith("_ms") and _int_ms(value) > 0)
+            }
+            if compact_event:
+                snapshot["events"].append(compact_event)
+
+        enriched: list[Any] = []
+        for value in attempts:
+            if not isinstance(value, dict):
+                enriched.append(value)
+                continue
+            item = dict(value)
+            key = (_int_ms(item.get("slot")), _int_ms(item.get("attempt")))
+            snapshot = snapshots.get(key)
+            if snapshot:
+                monitor: dict[str, Any] = {}
+                metrics = {
+                    name: _int_ms(metric)
+                    for name, metric in snapshot["metrics"].items()
+                    if str(name).endswith("_ms") and _int_ms(metric) > 0
+                }
+                if metrics:
+                    monitor["metrics"] = metrics
+                attempt_events = snapshot["events"][-40:]
+                if attempt_events:
+                    monitor["events"] = attempt_events
+                if monitor:
+                    item["monitor"] = monitor
+            enriched.append(item)
+        detail["image_attempts"] = enriched
+
     def _summary(self, active: list[dict[str, Any]], completed: list[dict[str, Any]]) -> dict[str, Any]:
         success = sum(1 for item in completed if str(item.get("status") or "").lower() == "success")
         failed = len(completed) - success
@@ -509,9 +530,10 @@ class RealtimeMonitorService:
                 "sse_max_gap_ms",
                 "conversation_stream_ms",
                 "stream_error_ms",
+                "poll_wait_ms",
+                "poll_request_ms",
                 "resolve_ms",
                 "download_ms",
-                "retry_wait_ms",
             ),
             key=lambda key: metric_p95.get(key, 0),
             default="",
@@ -568,10 +590,7 @@ class RealtimeMonitorService:
     def _is_local_reject_or_busy(self, record: dict[str, Any]) -> bool:
         if str(record.get("stage") or "") == "image_local_rejected":
             return True
-        if str(record.get("local_reason") or ""):
-            return True
-        error = str(record.get("error") or "").lower()
-        return any(pattern in error for pattern in LOCAL_REJECT_PATTERNS)
+        return bool(str(record.get("local_reason") or ""))
 
     def _egress_label(self, record: dict[str, Any]) -> str:
         source = str(record.get("proxy_source") or "direct").strip() or "direct"
@@ -682,7 +701,7 @@ class RealtimeMonitorService:
                 {
                     key: value
                     for key, value in event.items()
-                    if key in {"time", "event", "label", "index", "total", "status"}
+                    if key in {"time", "event", "label", "index", "total", "attempt", "status"}
                     or key in RAW_DIAGNOSTIC_FIELDS
                     or (str(key).endswith("_ms") and _int_ms(value) > 0)
                 }
@@ -730,6 +749,7 @@ class RealtimeMonitorService:
             for key in (
                 "index",
                 "total",
+                "attempt",
                 "status",
                 "account_wait_ms",
                 "egress_wait_ms",
@@ -751,9 +771,10 @@ class RealtimeMonitorService:
                 "sse_event_count",
                 "conversation_stream_ms",
                 "stream_error_ms",
+                "poll_wait_ms",
+                "poll_request_ms",
                 "resolve_ms",
                 "download_ms",
-                "retry_wait_ms",
                 "response_ms",
                 "stream_ms",
                 "total_ms",

@@ -3,6 +3,7 @@ import type { RuntimeLog, SystemLogsResponse, SystemLogRow } from '@/api/logs'
 import type { ActionMenuItem } from 'nanocat-ui'
 import { actionMenuGroups } from '@/components/ai/menuItems'
 import {
+  formatLogDuration,
   isSystemLogFailed as isFailed,
   isSystemLogLimited as isLimited,
   isSystemLogSuccess as isSuccess,
@@ -62,6 +63,11 @@ export type LogPreviewImage = {
 export type SystemLogRowSignatureInput = {
   selected: boolean
   firstImageBroken: boolean
+}
+
+type LogDurationDisplay = {
+  total: string
+  breakdown: string
 }
 
 export const typeOptions = [
@@ -249,7 +255,36 @@ export function statusTone(item: SystemLogRow): LogStatusTone {
   return 'muted'
 }
 
+export function logDurationDisplay(item: SystemLogRow): LogDurationDisplay {
+  const attemptsBySlot = new Map<number, number[]>()
+  item.imageAttempts.forEach((attempt) => {
+    if (attempt.durationMs <= 0) return
+    const durations = attemptsBySlot.get(attempt.slot) || []
+    durations.push(attempt.durationMs)
+    attemptsBySlot.set(attempt.slot, durations)
+  })
+
+  const retryGroups = Array.from(attemptsBySlot, ([slot, durations]) => ({ slot, durations }))
+    .filter((group) => group.durations.length > 1)
+    .sort((left, right) => left.slot - right.slot)
+  const uniqueSlotCount = new Set(item.imageAttempts.map((attempt) => attempt.slot)).size
+  const fallbackTotalMs = retryGroups.length === 1 && uniqueSlotCount === 1
+    ? retryGroups[0].durations.reduce((total, duration) => total + duration, 0)
+    : 0
+  const total = formatLogDuration(item.durationMs)
+    || (fallbackTotalMs > 0 ? formatLogDuration(fallbackTotalMs) : '')
+  if (!retryGroups.length) return { total, breakdown: '' }
+
+  const hasMultipleSlots = uniqueSlotCount > 1
+  const expressions = retryGroups.map(({ slot, durations }) => {
+    const expression = durations.map((duration) => formatLogDuration(duration)).join(' + ')
+    return hasMultipleSlots ? `图 ${slot}：${expression}` : expression
+  })
+  return { total, breakdown: `(${expressions.join('；')})` }
+}
+
 export function systemLogRowSignature(item: SystemLogRow, input: SystemLogRowSignatureInput): string {
+  const durationDisplay = logDurationDisplay(item)
   return [
     item.id,
     input.selected ? 1 : 0,
@@ -258,10 +293,12 @@ export function systemLogRowSignature(item: SystemLogRow, input: SystemLogRowSig
     boundedSignatureText(typeLabel(item.type), 64),
     boundedSignatureText(tokenLabel(item), 96),
     boundedSignatureText(item.durationMs, 64),
+    boundedSignatureText(durationDisplay.breakdown, 160),
     boundedSignatureText(statusLabel(item), 64),
     statusTone(item),
     boundedSignatureText(summaryText(item)),
     item.imageUrls.length,
+    item.accountSwitchCount,
     item.imageUrls.slice(0, 4).map((url) => boundedSignatureText(url, 96)).join(','),
     boundedSignatureText(item.preview),
     isFailed(item) ? 1 : 0,

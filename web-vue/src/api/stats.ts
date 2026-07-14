@@ -1,4 +1,5 @@
 import apiClient from './client'
+import { isRateLimitFailureCode } from './logs'
 import type { AdminStats, DashboardResponse } from '@/types/api'
 
 function seriesFromRecord(record: Record<string, number> | undefined) {
@@ -13,7 +14,10 @@ function fallbackTrend(logs: DashboardResponse['logs']) {
   const successCount = Number(logs.success || 0)
   const failedCount = Number(logs.failed || 0)
   const totalRequests = Math.max(Number(logs.total || 0), successCount + failedCount)
-  const rateLimited = Number(logs.by_error_code?.rate_limited || logs.by_error_code?.rate_limit || 0)
+  const rateLimited = Object.entries(logs.by_error_code || {}).reduce(
+    (total, [code, count]) => total + (isRateLimitFailureCode(code) ? Number(count || 0) : 0),
+    0,
+  )
   return {
     labels: ['当前'],
     total_requests: [totalRequests],

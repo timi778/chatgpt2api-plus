@@ -11,7 +11,7 @@
         </p>
         <p class="mt-1 text-xs text-muted-foreground">{{ row.endpoint || '-' }}</p>
       </div>
-      <StateBadge :tone="statusTone(row.status)" size="xs" shape="rounded" :bordered="false">
+      <StateBadge :tone="statusTone(row.status)" size="xs" shape="rounded">
         {{ formatMs(row.duration_ms) }}
       </StateBadge>
     </div>

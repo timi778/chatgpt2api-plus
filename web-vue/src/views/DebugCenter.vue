@@ -28,7 +28,7 @@
       <div v-if="searchResult" class="debug-result-grid">
         <div class="debug-result-card">
           <div class="debug-result-meta">
-            <StateBadge tone="success" shape="rounded" :bordered="false">{{ searchResult.status || 'done' }}</StateBadge>
+            <StateBadge tone="success" shape="rounded">{{ searchResult.status || 'done' }}</StateBadge>
             <span>{{ searchElapsedLabel }}</span>
             <span>{{ searchResult.sources?.length || 0 }} sources</span>
           </div>
@@ -105,7 +105,7 @@
             class="debug-task-card"
           >
             <div class="flex flex-wrap items-center gap-2">
-              <StateBadge :tone="editableStatusTone(task.status)" shape="rounded" :bordered="false">
+              <StateBadge :tone="editableStatusTone(task.status)" shape="rounded">
                 {{ editableStatusLabel(task.status) }}
               </StateBadge>
               <span class="font-mono text-[11px] text-muted-foreground">{{ editableTaskId(task) }}</span>

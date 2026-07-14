@@ -32,26 +32,7 @@ export interface ImageTask {
   usage?: Record<string, unknown>
   error?: string
   error_code?: string
-  raw_error?: string
-  upstream_error?: string
-  reason?: string
-  upstream_error_type?: string
-  upstream_request_id?: string
   can_resume_poll?: boolean
-  raw_upstream_message?: string
-  raw_upstream_message_len?: number
-  raw_upstream_message_truncated?: boolean
-  upstream_message_preview?: string
-  upstream_message_len?: number
-  upstream_message_truncated?: boolean
-  tool_invoked?: boolean
-  terminal_message?: string
-  blocked?: boolean
-  diagnosis?: Record<string, unknown>
-  poll_attempts?: number
-  poll_timeout_secs?: number
-  stream_timeout_secs?: number
-  last_task_error?: string
 }
 
 export interface ImageTasksResponse {
@@ -251,30 +232,7 @@ function normalizeTask(raw: Partial<ImageTask>): ImageTask {
     usage: raw.usage && typeof raw.usage === 'object' ? raw.usage : undefined,
     error: cleanString(raw.error),
     error_code: cleanString(raw.error_code),
-    raw_error: cleanString(raw.raw_error),
-    upstream_error: cleanString(raw.upstream_error),
-    reason: cleanString(raw.reason),
-    upstream_error_type: cleanString(raw.upstream_error_type),
-    upstream_request_id: cleanString(raw.upstream_request_id),
     can_resume_poll: Boolean(raw.can_resume_poll),
-    raw_upstream_message: cleanString(raw.raw_upstream_message),
-    raw_upstream_message_len: Number.isFinite(Number(raw.raw_upstream_message_len))
-      ? Number(raw.raw_upstream_message_len)
-      : undefined,
-    raw_upstream_message_truncated: Boolean(raw.raw_upstream_message_truncated),
-    upstream_message_preview: cleanString(raw.upstream_message_preview),
-    upstream_message_len: Number.isFinite(Number(raw.upstream_message_len))
-      ? Number(raw.upstream_message_len)
-      : undefined,
-    upstream_message_truncated: Boolean(raw.upstream_message_truncated),
-    tool_invoked: typeof raw.tool_invoked === 'boolean' ? raw.tool_invoked : undefined,
-    terminal_message: cleanString(raw.terminal_message),
-    blocked: typeof raw.blocked === 'boolean' ? raw.blocked : undefined,
-    diagnosis: raw.diagnosis && typeof raw.diagnosis === 'object' ? raw.diagnosis : undefined,
-    poll_attempts: Number.isFinite(Number(raw.poll_attempts)) ? Number(raw.poll_attempts) : undefined,
-    poll_timeout_secs: Number.isFinite(Number(raw.poll_timeout_secs)) ? Number(raw.poll_timeout_secs) : undefined,
-    stream_timeout_secs: Number.isFinite(Number(raw.stream_timeout_secs)) ? Number(raw.stream_timeout_secs) : undefined,
-    last_task_error: cleanString(raw.last_task_error),
   }
 }
 
@@ -383,18 +341,7 @@ export function imageTaskProgressLabel(task?: ImageTask | null) {
 }
 
 export function taskPrimaryMessage(task?: ImageTask | null) {
-  if (!task) return ''
-  if (task.upstream_request_id) {
-    const base = task.reason || task.error || '上游图片工具返回错误'
-    return `${base}（request_id: ${task.upstream_request_id}）`
-  }
-  return task.reason
-    || task.error
-    || task.upstream_message_preview
-    || task.terminal_message
-    || task.upstream_error
-    || task.raw_error
-    || ''
+  return cleanString(task?.error)
 }
 
 export function imageAssetUrl(asset: ImageTaskAsset) {
