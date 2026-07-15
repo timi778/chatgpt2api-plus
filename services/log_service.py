@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import itertools
 import re
 import threading
 import time
@@ -966,13 +965,6 @@ def _protocol_error_response(exc: Exception, status_code: int, sse: str) -> JSON
     return openai_error_response(message, status_code)
 
 
-def _next_item(items):
-    try:
-        return True, next(items)
-    except StopIteration:
-        return False, None
-
-
 @dataclass
 class LoggedCall:
     identity: dict[str, object]
@@ -1059,54 +1051,108 @@ class LoggedCall:
                 sender = lambda items: sse_json_stream(items, error_builder=_image_error_payload)
             else:
                 sender = sse_json_stream
-        first_item_submitted = time.perf_counter()
+        stream_created_at = time.perf_counter()
 
-        def _next_item_with_timing():
-            first_item_started = time.perf_counter()
-            queue_ms = int((first_item_started - first_item_submitted) * 1000)
+        def _timed_result():
+            first_item = True
+            for item in result:
+                if first_item:
+                    first_item = False
+                    first_item_ms = int((time.perf_counter() - stream_created_at) * 1000)
+                    if trace_perf:
+                        self.perf_timings["stream_first_item_ms"] = first_item_ms
+                        realtime_monitor_service.stage(
+                            self.call_id,
+                            "stream_first_item",
+                            stream_first_item_ms=first_item_ms,
+                            endpoint=self.endpoint,
+                            model=self.model,
+                        )
+                    if trace_perf and first_item_ms >= PERF_WAIT_WARN_MS:
+                        logger.warning({
+                            "event": "api_stream_first_item_slow",
+                            "call_id": self.call_id,
+                            "endpoint": self.endpoint,
+                            "model": self.model,
+                            "first_item_ms": first_item_ms,
+                        })
+                yield item
+
+        return StreamingResponse(
+            sender(self.stream(_timed_result())),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    async def run_async_json(self, handler, *args):
+        from services.async_response import async_json_heartbeat_response
+
+        if args and isinstance(args[0], dict):
+            self.attach_trace_metadata(args[0])
+        image_request = self._is_image_request()
+        trace_perf = self._trace_image_perf()
+        if trace_perf:
+            realtime_monitor_service.start(
+                self.call_id,
+                endpoint=self.endpoint,
+                model=self.model,
+                summary=self.summary,
+                role=str(self.identity.get("role") or ""),
+                key_name=str(self.identity.get("name") or ""),
+            )
+        handler_submitted = time.perf_counter()
+
+        def _run_logged() -> dict[str, Any]:
+            handler_started = time.perf_counter()
             if trace_perf:
-                self.perf_timings["stream_first_queue_ms"] = queue_ms
+                self.perf_timings["handler_queue_ms"] = int((handler_started - handler_submitted) * 1000)
                 realtime_monitor_service.stage(
                     self.call_id,
-                    "stream_first_item",
-                    stream_first_queue_ms=queue_ms,
+                    "handler_started",
+                    handler_queue_ms=self.perf_timings["handler_queue_ms"],
                     endpoint=self.endpoint,
                     model=self.model,
                 )
-            if trace_perf and queue_ms >= PERF_WAIT_WARN_MS:
-                logger.warning({
-                    "event": "api_stream_first_item_threadpool_wait_slow",
-                    "call_id": self.call_id,
-                    "endpoint": self.endpoint,
-                    "model": self.model,
-                    "queue_ms": queue_ms,
-                })
-            try:
-                return _next_item(result)
-            finally:
-                if trace_perf:
-                    self.perf_timings["stream_first_exec_ms"] = int((time.perf_counter() - first_item_started) * 1000)
 
-        try:
-            has_first, first = await run_in_threadpool(_next_item_with_timing)
-        except ImageGenerationError as exc:
-            self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""),
-                     conversation_id=getattr(exc, "conversation_id", ""),
-                     extra=_exception_log_fields(exc, image=image_request))
-            return _image_error_response(exc)
-        except HTTPException as exc:
-            self.log("调用失败", status="failed", error=str(exc.detail))
-            raise
-        except Exception as exc:
-            self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""),
-                     extra=_exception_log_fields(exc, image=image_request))
-            if image_request:
-                return _image_error_response(exc)
-            return _protocol_error_response(exc, 502, sse)
-        if not has_first:
-            self.log("流式调用结束")
-            return StreamingResponse(sender(()), media_type="text/event-stream")
-        return StreamingResponse(sender(self.stream(itertools.chain([first], result))), media_type="text/event-stream")
+            def finish_timing() -> None:
+                if trace_perf:
+                    self.perf_timings["handler_exec_ms"] = int((time.perf_counter() - handler_started) * 1000)
+
+            try:
+                result = handler(*args)
+                if not isinstance(result, dict):
+                    raise RuntimeError("async JSON image response cannot wrap streaming result")
+                finish_timing()
+                self.log("调用完成", result)
+                cleaned = _strip_internal_response_fields(result)
+                return cleaned if isinstance(cleaned, dict) else {}
+            except ImageGenerationError as exc:
+                finish_timing()
+                self.log(
+                    "调用失败",
+                    status="failed",
+                    error=str(exc),
+                    account_email=getattr(exc, "account_email", ""),
+                    conversation_id=getattr(exc, "conversation_id", ""),
+                    extra=_exception_log_fields(exc, image=image_request),
+                )
+                raise
+            except HTTPException as exc:
+                finish_timing()
+                self.log("调用失败", status="failed", error=str(exc.detail))
+                raise
+            except Exception as exc:
+                finish_timing()
+                self.log(
+                    "调用失败",
+                    status="failed",
+                    error=str(exc),
+                    account_email=getattr(exc, "account_email", ""),
+                    extra=_exception_log_fields(exc, image=image_request),
+                )
+                raise
+
+        return await run_in_threadpool(async_json_heartbeat_response, _run_logged)
 
     def _is_image_request(self) -> bool:
         if self.image_request or self.endpoint.startswith("/v1/images"):

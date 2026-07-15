@@ -445,6 +445,14 @@ class ConfigStore:
             return 300
 
     @property
+    def image_response_heartbeat_secs(self) -> float:
+        self.reload_if_changed()
+        try:
+            return max(1.0, float(self.data.get("image_response_heartbeat_secs", 5.0)))
+        except (TypeError, ValueError):
+            return 5.0
+
+    @property
     def image_poll_interval_secs(self) -> float:
         try:
             return max(0.5, float(self.data.get("image_poll_interval_secs", 10.0)))
@@ -604,6 +612,7 @@ class ConfigStore:
             data["log_retention_days"] = self.log_retention_days
             data["image_poll_timeout_secs"] = self.image_poll_timeout_secs
             data["image_stream_timeout_secs"] = self.image_stream_timeout_secs
+            data["image_response_heartbeat_secs"] = self.image_response_heartbeat_secs
             data["image_poll_interval_secs"] = self.image_poll_interval_secs
             data["image_poll_initial_wait_secs"] = self.image_poll_initial_wait_secs
             data["image_account_concurrency"] = self.image_account_concurrency

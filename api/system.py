@@ -53,6 +53,7 @@ SETTINGS_UPDATE_KEYS = {
     "log_retention_days",
     "image_poll_timeout_secs",
     "image_stream_timeout_secs",
+    "image_response_heartbeat_secs",
     "image_poll_interval_secs",
     "image_poll_initial_wait_secs",
     "image_account_concurrency",

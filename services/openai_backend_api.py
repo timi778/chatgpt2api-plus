@@ -27,6 +27,7 @@ from services.image_failure import (
     ImageFailure,
     ImageFailureError,
     ImagePollTimeoutError,
+    ImageTextReplyError,
     InvalidAccessTokenError,
     classify_conversation_failure,
     classify_image_exception,
@@ -2620,6 +2621,8 @@ class OpenAIBackendAPI:
         last_conversation_snapshot: Dict[str, Any] = {}
         last_assistant_text = ""
         last_retryable_poll_error: Exception | None = None
+        last_text_reply_failure: ImageFailure | None = None
+        last_text_reply_detail = ""
         while _remaining() > 0:
             attempt += 1
             last_task_error = ""
@@ -2726,16 +2729,25 @@ class OpenAIBackendAPI:
                             "task_count": task_count if task_check_ok else None,
                             "message_preview": diagnostic_excerpt(raw_detail, 1000),
                         })
-                    exc = ImageFailureError(
-                        raw_detail,
-                        failure=failure.with_raw_detail(raw_detail or failure.raw_detail),
-                    )
-                    setattr(exc, "conversation_id", conversation_id or "")
-                    setattr(exc, "upstream_error", raw_detail)
-                    setattr(exc, "raw_upstream_message", raw_detail)
-                    setattr(exc, "last_assistant_text", last_assistant_text)
-                    setattr(exc, "last_conversation_snapshot", last_conversation_snapshot or {})
-                    raise exc
+                    resolved_failure = failure.with_raw_detail(raw_detail or failure.raw_detail)
+                    if resolved_failure.code == "upstream_text_reply":
+                        if raw_detail != last_text_reply_detail:
+                            logger.info({
+                                "event": "image_poll_text_reply_deferred",
+                                "conversation_id": conversation_id,
+                                "attempt": attempt,
+                                "message_preview": diagnostic_excerpt(raw_detail, 500),
+                            })
+                        last_text_reply_failure = resolved_failure
+                        last_text_reply_detail = raw_detail
+                    else:
+                        exc = ImageFailureError(raw_detail, failure=resolved_failure)
+                        setattr(exc, "conversation_id", conversation_id or "")
+                        setattr(exc, "upstream_error", raw_detail)
+                        setattr(exc, "raw_upstream_message", raw_detail)
+                        setattr(exc, "last_assistant_text", last_assistant_text)
+                        setattr(exc, "last_conversation_snapshot", last_conversation_snapshot or {})
+                        raise exc
 
             logger.debug({"event": "image_poll_check", "conversation_id": conversation_id, "attempt": attempt,
                           "file_ids": file_ids, "sediment_ids": sediment_ids})
@@ -2784,6 +2796,19 @@ class OpenAIBackendAPI:
             setattr(last_retryable_poll_error, "last_assistant_text", last_assistant_text)
             setattr(last_retryable_poll_error, "last_conversation_snapshot", last_conversation_snapshot or {})
             raise last_retryable_poll_error
+        if last_text_reply_failure is not None:
+            exc = ImageTextReplyError(
+                last_text_reply_detail,
+                failure=last_text_reply_failure,
+            )
+            setattr(exc, "conversation_id", conversation_id or "")
+            setattr(exc, "upstream_error", last_text_reply_detail)
+            setattr(exc, "raw_upstream_message", last_text_reply_detail)
+            setattr(exc, "last_assistant_text", last_assistant_text)
+            setattr(exc, "last_conversation_snapshot", last_conversation_snapshot or {})
+            setattr(exc, "poll_attempts", attempt)
+            setattr(exc, "poll_timeout_secs", timeout_secs)
+            raise exc
         logger.info({
             "event": "image_poll_timeout",
             "conversation_id": conversation_id,

@@ -1435,6 +1435,57 @@ def _image_result_output_from_urls(
     )
 
 
+def _recover_delayed_image_result(
+        backend: OpenAIBackendAPI,
+        request: ConversationRequest,
+        conversation_id: str,
+        file_ids: list[str],
+        sediment_ids: list[str],
+        index: int,
+        total: int,
+) -> ImageOutput | None:
+    """空结果时只追加一次短延迟轮询，避免把总等待时间无限放大。"""
+    if not conversation_id:
+        return None
+    wait_secs = min(10.0, max(1.0, float(config.image_poll_interval_secs)))
+    retry_timeout = min(60.0, max(20.0, float(config.image_poll_timeout_secs) / 2.0))
+    logger.info({
+        "event": "image_delayed_recovery_wait",
+        "conversation_id": conversation_id,
+        "wait_secs": wait_secs,
+        "poll_timeout_secs": retry_timeout,
+    })
+    time.sleep(wait_secs)
+    try:
+        image_urls = _resolve_image_urls_with_monitor(
+            backend,
+            request,
+            conversation_id,
+            file_ids,
+            sediment_ids,
+            poll_timeout_secs=retry_timeout,
+            index=index,
+            total=total,
+            path="delayed_recovery",
+        )
+    except (ImagePollTimeoutError, ImageTextReplyError) as exc:
+        logger.warning({
+            "event": "image_delayed_recovery_exhausted",
+            "conversation_id": conversation_id,
+            "error": diagnostic_excerpt(exc, 500),
+        })
+        return None
+    return _image_result_output_from_urls(
+        backend,
+        request,
+        conversation_id,
+        image_urls,
+        index,
+        total,
+        path="delayed_recovery",
+    )
+
+
 def stream_image_outputs(
         backend: OpenAIBackendAPI,
         request: ConversationRequest,
@@ -1443,8 +1494,8 @@ def stream_image_outputs(
 ) -> Iterator[ImageOutput]:
     """执行一张 ChatGPT 图片任务。
 
-    统一原则：上游 SSE 只负责启动/生成阶段；SSE 结束后只进入一次结果解析/轮询。
-    不再在文本回复、空结果、轮询超时后叠加多轮长重试，避免一个配置的 300 秒被隐式放大到十几分钟。
+    上游 SSE 负责启动/生成阶段；SSE 结束后执行一次主轮询，并允许一次
+    有界延迟恢复。账号层重试仍受 image_max_account_attempts 限制。
     """
     last: dict[str, Any] = {}
     conversation_stream_started = time.perf_counter()
@@ -1513,6 +1564,9 @@ def stream_image_outputs(
         stream_failure is not None
         and stream_failure.code == "upstream_text_reply"
     )
+    recoverable_text_reply = is_text_reply
+    if recoverable_text_reply:
+        should_poll_for_image = True
     conversation_stream_ms = int((time.perf_counter() - conversation_stream_started) * 1000)
     http_timing = _backend_http_timing_data(backend)
     _monitor_image_stage(
@@ -1593,8 +1647,14 @@ def stream_image_outputs(
                 "failure_code": stream_failure.code,
                 "error": diagnostic_excerpt(message, 1000),
             })
+        recoverable_text_reply = bool(
+            stream_failure is not None
+            and stream_failure.code == "upstream_text_reply"
+        )
+        if recoverable_text_reply:
+            should_poll_for_image = True
 
-    if stream_failure is not None and not file_ids and not sediment_ids:
+    if stream_failure is not None and not recoverable_text_reply and not file_ids and not sediment_ids:
         yield ImageOutput(
             kind="message",
             model=request.model,
@@ -1639,6 +1699,20 @@ def stream_image_outputs(
     if result_output:
         yield result_output
         return
+
+    if conversation_id and should_poll_for_image:
+        recovered_output = _recover_delayed_image_result(
+            backend,
+            request,
+            conversation_id,
+            file_ids,
+            sediment_ids,
+            index,
+            total,
+        )
+        if recovered_output:
+            yield recovered_output
+            return
 
     if message and not should_poll_for_image:
         yield ImageOutput(

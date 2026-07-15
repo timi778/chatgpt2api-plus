@@ -206,15 +206,52 @@ def _stream_error_payload(
     return {"error": {"message": str(exc), "type": exc.__class__.__name__}}
 
 
+def _sse_heartbeat_secs() -> float:
+    try:
+        from services.config import config
+
+        return max(1.0, float(config.image_response_heartbeat_secs))
+    except Exception:
+        return 5.0
+
+
+def _queued_stream_events(items, thread_name: str) -> Iterator[tuple[str, object]]:
+    events: queue.Queue[tuple[str, object]] = queue.Queue()
+
+    def pump() -> None:
+        try:
+            for item in items:
+                events.put(("item", item))
+        except Exception as exc:
+            events.put(("error", exc))
+        finally:
+            events.put(("done", None))
+
+    threading.Thread(target=pump, daemon=True, name=thread_name).start()
+    heartbeat_secs = _sse_heartbeat_secs()
+    while True:
+        try:
+            yield events.get(timeout=heartbeat_secs)
+        except queue.Empty:
+            yield "heartbeat", None
+
+
 def sse_json_stream(
     items,
     error_builder: Callable[[Exception], dict[str, Any]] | None = None,
 ) -> Iterator[str]:
     yield ": stream-open\n\n"
-    try:
-        for item in items:
+    for kind, payload in _queued_stream_events(items, "sse-json-stream"):
+        if kind == "heartbeat":
+            yield ": ping\n\n"
+            continue
+        if kind == "done":
+            break
+        if kind == "item":
+            item = payload
             yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
-    except Exception as exc:
+            continue
+        exc = payload if isinstance(payload, Exception) else RuntimeError(str(payload))
         logger.warning({
             "event": "sse_stream_error",
             "error_type": exc.__class__.__name__,
@@ -222,6 +259,7 @@ def sse_json_stream(
         })
         error = _stream_error_payload(exc, error_builder)
         yield f"data: {json.dumps(error, ensure_ascii=False)}\n\n"
+        break
     yield "data: [DONE]\n\n"
 
 
@@ -229,12 +267,20 @@ def image_sse_stream(
     items,
     error_builder: Callable[[Exception], dict[str, Any]] | None = None,
 ) -> Iterator[str]:
-    try:
-        for item in items:
+    yield ": stream-open\n\n"
+    for kind, payload in _queued_stream_events(items, "image-sse-stream"):
+        if kind == "heartbeat":
+            yield ": ping\n\n"
+            continue
+        if kind == "done":
+            break
+        if kind == "item":
+            item = payload
             event = str(item.get("type") or "message") if isinstance(item, dict) else "message"
             yield f"event: {event}\n"
             yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
-    except Exception as exc:
+            continue
+        exc = payload if isinstance(payload, Exception) else RuntimeError(str(payload))
         logger.warning({
             "event": "image_sse_stream_error",
             "error_type": exc.__class__.__name__,
@@ -243,6 +289,7 @@ def image_sse_stream(
         error = _stream_error_payload(exc, error_builder)
         yield "event: error\n"
         yield f"data: {json.dumps(error, ensure_ascii=False)}\n\n"
+        break
 
 
 def anthropic_sse_stream(items) -> Iterator[str]:

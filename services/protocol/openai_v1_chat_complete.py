@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import queue
+import random
 import time
+import threading
 import uuid
 from typing import Any, Iterable, Iterator
 
@@ -285,23 +288,92 @@ def image_chat_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
         call_id=str(body.get("_call_id") or ""),
         trace_image_perf=bool(body.get("_trace_image_perf")),
     ))
-    yield from stream_image_chat_completion(image_outputs, model)
+    yield from stream_image_chat_completion(
+        image_outputs,
+        model,
+        keepalive_interval=_image_keepalive_interval_secs(body),
+    )
 
 
-def stream_image_chat_completion(image_outputs: Iterable[ImageOutput], model: str) -> Iterator[dict[str, Any]]:
+_IMAGE_CHAT_KEEPALIVE_HINTS = (
+    "正在处理图片，请稍候。",
+    "图片生成仍在进行中，连接保持中。",
+    "正在等待上游返回图片结果。",
+    "正在渲染图片，请稍后。",
+)
+
+
+def _image_keepalive_interval_secs(body: dict[str, Any]) -> float:
+    raw = body.get("keepalive_interval", body.get("keepalive_secs"))
+    try:
+        value = float(raw) if raw is not None else 8.0
+    except (TypeError, ValueError):
+        value = 8.0
+    if value != value:
+        value = 8.0
+    return min(30.0, max(2.0, value))
+
+
+def _image_keepalive_text(started_at: float) -> str:
+    elapsed = max(0, int(time.time() - started_at))
+    return f"{random.choice(_IMAGE_CHAT_KEEPALIVE_HINTS)}（已等待 {elapsed} 秒）\n"
+
+
+def stream_image_chat_completion(
+    image_outputs: Iterable[ImageOutput],
+    model: str,
+    keepalive_interval: float = 8.0,
+) -> Iterator[dict[str, Any]]:
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
     sent_role = False
-    sent_text = ""
-    for output in image_outputs:
+    sent_progress_text = ""
+    started_at = time.time()
+    events: queue.Queue[tuple[str, object]] = queue.Queue()
+
+    def _pump() -> None:
+        try:
+            for item in image_outputs:
+                events.put(("output", item))
+        except Exception as exc:
+            events.put(("error", exc))
+        finally:
+            events.put(("done", None))
+
+    threading.Thread(target=_pump, daemon=True, name="image-chat-stream").start()
+
+    while True:
+        try:
+            kind, payload = events.get(timeout=max(0.1, keepalive_interval))
+        except queue.Empty:
+            content = _image_keepalive_text(started_at)
+            if not sent_role:
+                sent_role = True
+                yield completion_chunk(model, {"role": "assistant", "content": content}, None, completion_id, created)
+            else:
+                yield completion_chunk(model, {"content": content}, None, completion_id, created)
+            continue
+
+        if kind == "done":
+            break
+        if kind == "error":
+            raise payload if isinstance(payload, Exception) else RuntimeError(str(payload))
+        if kind != "output" or not isinstance(payload, ImageOutput):
+            continue
+
+        output = payload
         content = ""
         if output.kind == "progress":
             content = output.text
-            sent_text += content
+            sent_progress_text += content
         elif output.kind == "result":
             content = build_chat_image_markdown_content({"data": output.data})
         elif output.kind == "message":
-            content = output.text[len(sent_text):] if output.text.startswith(sent_text) else output.text
+            content = (
+                output.text[len(sent_progress_text):]
+                if output.text.startswith(sent_progress_text)
+                else output.text
+            )
         if not content:
             continue
         if not sent_role:

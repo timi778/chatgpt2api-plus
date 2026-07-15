@@ -128,6 +128,8 @@ def create_router() -> APIRouter:
         attach_trace_headers(call, request)
         call.attach_trace_metadata(payload)
         await filter_or_log(call, body.prompt)
+        if not body.stream:
+            return await call.run_async_json(openai_v1_image_generations.handle, payload)
         return await call.run(openai_v1_image_generations.handle, payload)
 
     @router.post("/v1/images/edits")
@@ -147,6 +149,8 @@ def create_router() -> APIRouter:
         if mask_sources:
             payload["mask"] = await read_image_sources(mask_sources)
         payload["base_url"] = resolve_image_base_url(request)
+        if not payload.get("stream"):
+            return await call.run_async_json(openai_v1_image_edit.handle, payload)
         return await call.run(openai_v1_image_edit.handle, payload)
 
     @router.post("/v1/chat/completions")
@@ -169,12 +173,20 @@ def create_router() -> APIRouter:
         attach_trace_headers(call, request)
         call.attach_trace_metadata(payload)
         await filter_or_log(call, request_preview)
+        if image_chat and not payload.get("stream"):
+            return await call.run_async_json(openai_v1_chat_complete.handle, payload)
         return await call.run(openai_v1_chat_complete.handle, payload)
 
     @router.post("/v1/responses")
-    async def create_response(body: ResponseCreateRequest, authorization: str | None = Header(default=None)):
+    async def create_response(
+            body: ResponseCreateRequest,
+            request: Request,
+            authorization: str | None = Header(default=None),
+    ):
         identity = require_identity(authorization)
         payload = body.model_dump(mode="python")
+        if not str(payload.get("base_url") or "").strip():
+            payload["base_url"] = resolve_image_base_url(request)
         model = str(payload.get("model") or "auto")
         request_preview = request_text(payload.get("input"), payload.get("instructions"))
         image_response = has_response_image_generation_tool(payload)
@@ -189,6 +201,8 @@ def create_router() -> APIRouter:
         )
         call.attach_trace_metadata(payload)
         await filter_or_log(call, request_preview)
+        if image_response and not payload.get("stream"):
+            return await call.run_async_json(openai_v1_response.handle, payload)
         return await call.run(openai_v1_response.handle, payload)
 
     @router.post("/v1/messages")
