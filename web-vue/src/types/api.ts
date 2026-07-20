@@ -283,6 +283,7 @@ export interface AccountAutoRefreshStatus {
   total?: number
   processed?: number
   refreshed?: number
+  abnormal_detected?: number
   failed?: number
   batch_size?: number
   batch_count?: number

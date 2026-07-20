@@ -163,6 +163,7 @@ class AccountService:
             "total": 0,
             "processed": 0,
             "refreshed": 0,
+            "abnormal_detected": 0,
             "failed": 0,
             "batch_size": 0,
             "batch_count": 0,
@@ -2083,6 +2084,7 @@ class AccountService:
                 "total": max(0, int(total or 0)),
                 "processed": 0,
                 "refreshed": 0,
+                "abnormal_detected": 0,
                 "failed": 0,
                 "batch_size": max(0, int(batch_size or 0)),
                 "batch_count": max(0, int(batch_count or 0)),
@@ -2107,6 +2109,7 @@ class AccountService:
         *,
         processed: int | None = None,
         refreshed: int | None = None,
+        abnormal_detected: int | None = None,
         failed: int | None = None,
         batch_index: int | None = None,
     ) -> None:
@@ -2115,6 +2118,8 @@ class AccountService:
             updates["processed"] = max(0, int(processed or 0))
         if refreshed is not None:
             updates["refreshed"] = max(0, int(refreshed or 0))
+        if abnormal_detected is not None:
+            updates["abnormal_detected"] = max(0, int(abnormal_detected or 0))
         if failed is not None:
             updates["failed"] = max(0, int(failed or 0))
         if batch_index is not None:
@@ -2128,6 +2133,7 @@ class AccountService:
         success: bool,
         processed: int,
         refreshed: int,
+        abnormal_detected: int,
         failed: int,
         error: str = "",
         next_run_at: str = "",
@@ -2146,6 +2152,7 @@ class AccountService:
                 "next_run_at": str(next_run_at or ""),
                 "processed": max(0, int(processed or 0)),
                 "refreshed": max(0, int(refreshed or 0)),
+                "abnormal_detected": max(0, int(abnormal_detected or 0)),
                 "failed": max(0, int(failed or 0)),
                 "duration_seconds": duration,
                 "error": str(error or "")[:1000],
@@ -2170,12 +2177,20 @@ class AccountService:
         access_tokens = list(dict.fromkeys(token for token in access_tokens if token))
         if not access_tokens:
             items = self.list_accounts()
-            result = {"refreshed": 0, "errors": [], "items": items}
+            result = {
+                "refreshed": 0,
+                "abnormal_detected": 0,
+                "detection_failed": 0,
+                "errors": [],
+                "items": items,
+            }
             if progress_id:
                 self.finish_refresh_progress(progress_id, result)
             return result
 
         refreshed = 0
+        abnormal_detected = 0
+        detection_failed = 0
         errors = []
         max_workers = min(10, len(access_tokens))
 
@@ -2198,6 +2213,15 @@ class AccountService:
                     raise
                 except Exception as exc:
                     failure = classify_image_exception(exc)
+                    current = self.get_account(token)
+                    current_status = str((current or {}).get("status") or "").strip()
+                    detected_abnormal = failure.code == "auth_invalid" and (
+                        current is None or current_status == "异常"
+                    )
+                    if detected_abnormal:
+                        abnormal_detected += 1
+                    else:
+                        detection_failed += 1
                     errors.append({
                         "token": anonymize_token(token),
                         "error": str(exc),
@@ -2207,6 +2231,8 @@ class AccountService:
                     if account is not None:
                         refreshed += 1
                         result_account = account
+                        if str(account.get("status") or "").strip() == "异常":
+                            abnormal_detected += 1
 
                 if progress_id:
                     self.update_refresh_progress(progress_id, token, result_account)
@@ -2220,6 +2246,8 @@ class AccountService:
 
         result = {
             "refreshed": refreshed,
+            "abnormal_detected": abnormal_detected,
+            "detection_failed": detection_failed,
             "errors": errors,
             "items": self.list_accounts(),
         }

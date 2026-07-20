@@ -142,7 +142,11 @@ def _normalize_account_snapshot(value: object) -> dict[str, Any] | None:
         "interval_minutes": _nonnegative_int(value.get("interval_minutes")),
         "active": _nonnegative_int(value.get("active")),
         "limited": _nonnegative_int(value.get("limited")),
-        "abnormal": _nonnegative_int(value.get("abnormal")),
+        "abnormal_detected": _nonnegative_int(
+            value.get("abnormal_detected")
+            if "abnormal_detected" in value
+            else value.get("abnormal")
+        ),
     }
 
 
@@ -380,6 +384,7 @@ class DashboardMetricsService:
         stats: dict[str, Any],
         *,
         interval_minutes: int,
+        abnormal_detected: int | None = None,
         recorded_at: datetime | str | None = None,
     ) -> None:
         dt = _parse_log_time(recorded_at) if recorded_at is not None else _beijing_now_naive()
@@ -390,7 +395,9 @@ class DashboardMetricsService:
             "interval_minutes": _nonnegative_int(interval_minutes),
             "active": _nonnegative_int(stats.get("active")),
             "limited": _nonnegative_int(stats.get("limited")),
-            "abnormal": _nonnegative_int(stats.get("abnormal")),
+            "abnormal_detected": _nonnegative_int(
+                stats.get("abnormal") if abnormal_detected is None else abnormal_detected
+            ),
         }
         with self._lock:
             self._pending.setdefault("account_snapshots", []).append(snapshot)
@@ -550,7 +557,7 @@ class DashboardMetricsService:
             "labels": [recorded_at.strftime(label_format) for recorded_at, _ in snapshots],
             "recorded_at": [recorded_at.isoformat(timespec="seconds") for recorded_at, _ in snapshots],
             "active_accounts": [snapshot["active"] for _, snapshot in snapshots],
-            "abnormal_accounts": [snapshot["abnormal"] for _, snapshot in snapshots],
+            "abnormal_accounts": [snapshot["abnormal_detected"] for _, snapshot in snapshots],
             "rate_limited_accounts": [snapshot["limited"] for _, snapshot in snapshots],
         }
 
@@ -566,8 +573,17 @@ def safe_record_dashboard_call(item: dict[str, Any]) -> None:
         logger.error({"event": "dashboard_metrics_record_failed", "error": str(exc)})
 
 
-def safe_record_account_snapshot(stats: dict[str, Any], *, interval_minutes: int) -> None:
+def safe_record_account_snapshot(
+    stats: dict[str, Any],
+    *,
+    interval_minutes: int,
+    abnormal_detected: int | None = None,
+) -> None:
     try:
-        dashboard_metrics_service.record_account_snapshot(stats, interval_minutes=interval_minutes)
+        dashboard_metrics_service.record_account_snapshot(
+            stats,
+            interval_minutes=interval_minutes,
+            abnormal_detected=abnormal_detected,
+        )
     except Exception as exc:
         logger.error({"event": "dashboard_account_snapshot_record_failed", "error": str(exc)})

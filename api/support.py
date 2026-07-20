@@ -120,7 +120,8 @@ def start_limited_account_watcher(stop_event: Event) -> Thread:
 
             processed = 0
             refreshed = 0
-            errors: list[object] = []
+            abnormal_detected = 0
+            detection_failed = 0
             interval_minutes = max(1, interval_seconds // 60)
             try:
                 limited_tokens = account_service.list_limited_tokens()
@@ -150,13 +151,13 @@ def start_limited_account_watcher(stop_event: Event) -> Thread:
                         result = account_service.refresh_accounts(batch)
                         processed += len(batch)
                         refreshed += int(result.get("refreshed") or 0)
-                        batch_errors = result.get("errors") if isinstance(result, dict) else []
-                        if isinstance(batch_errors, list):
-                            errors.extend(batch_errors)
+                        abnormal_detected += int(result.get("abnormal_detected") or 0)
+                        detection_failed += int(result.get("detection_failed") or 0)
                         account_service.update_auto_refresh_status(
                             processed=processed,
                             refreshed=refreshed,
-                            failed=len(errors),
+                            abnormal_detected=abnormal_detected,
+                            failed=detection_failed,
                             batch_index=batch_index,
                         )
                 else:
@@ -169,10 +170,11 @@ def start_limited_account_watcher(stop_event: Event) -> Thread:
                 next_interval_seconds = _account_refresh_interval_seconds()
                 stopped = stop_event.is_set() and processed < len(tokens)
                 account_service.finish_auto_refresh_status(
-                    success=not errors and not stopped,
+                    success=detection_failed == 0 and not stopped,
                     processed=processed,
                     refreshed=refreshed,
-                    failed=len(errors),
+                    abnormal_detected=abnormal_detected,
+                    failed=detection_failed,
                     error="stopped" if stopped else "",
                     next_run_at=(
                         ""
@@ -186,12 +188,17 @@ def start_limited_account_watcher(stop_event: Event) -> Thread:
                     success=False,
                     processed=processed,
                     refreshed=refreshed,
-                    failed=len(errors),
+                    abnormal_detected=abnormal_detected,
+                    failed=detection_failed,
                     error=str(exc),
                     next_run_at=_next_run_at(next_interval_seconds) if next_interval_seconds > 0 else "",
                 )
                 print(f"[account-watcher] fail {exc}")
-            safe_record_account_snapshot(account_service.get_stats(), interval_minutes=interval_minutes)
+            safe_record_account_snapshot(
+                account_service.get_stats(),
+                interval_minutes=interval_minutes,
+                abnormal_detected=abnormal_detected,
+            )
             _wait_for_next_account_refresh(stop_event, _account_refresh_interval_seconds())
 
     thread = Thread(target=worker, name="account-watcher", daemon=True)

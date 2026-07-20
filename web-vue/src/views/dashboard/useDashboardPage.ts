@@ -423,7 +423,7 @@ export function useDashboardPage() {
           showSymbol,
           zIndex: 3,
         }),
-        createLineSeries('异常账号', chartData.value.accountTrend.abnormalAccounts, chartColors.danger, {
+        createLineSeries('本轮发现异常', chartData.value.accountTrend.abnormalAccounts, chartColors.danger, {
           areaOpacity: 0.1,
           showSymbol,
           zIndex: 2,
@@ -585,6 +585,7 @@ export function useDashboardPage() {
     const total = Math.max(0, Number(status.total || 0))
     const processed = Math.max(0, Number(status.processed || 0))
     const refreshed = Math.max(0, Number(status.refreshed || 0))
+    const abnormalDetected = Math.max(0, Number(status.abnormal_detected || 0))
     const failed = Math.max(0, Number(status.failed || 0))
     const batchSize = Math.max(0, Number(status.batch_size || 0))
     const duration = formatDuration(status.duration_seconds)
@@ -616,22 +617,22 @@ export function useDashboardPage() {
       cardMeta = `自动刷新中 ${processed}/${total}`
       timeText = startedAt ? `开始于 ${startedAt}` : '正在刷新账号'
       summaryText = `已处理 ${processed}/${total} 个账号${batchSize ? `，每批 ${batchSize} 个` : ''}`
-      detailText = failed ? `当前失败 ${failed} 个` : ''
+      detailText = `本轮发现异常 ${abnormalDetected} 个${failed ? `，当前检测失败 ${failed} 个` : ''}`
     } else if (success === true) {
       tone = 'success'
       icon = 'lucide:circle-check'
       label = '成功'
       cardMeta = finishedAt ? `上次自动刷新 ${finishedAt}` : '自动刷新成功'
       timeText = finishedAt ? `完成于 ${finishedAt}` : '自动刷新已完成'
-      summaryText = `刷新 ${refreshed}/${total} 个账号，失败 ${failed} 个`
-      detailText = duration ? `耗时 ${duration}` : ''
+      summaryText = `刷新 ${refreshed}/${total} 个账号，本轮发现异常 ${abnormalDetected} 个`
+      detailText = `${failed ? `检测失败 ${failed} 个` : '检测无失败'}${duration ? `，耗时 ${duration}` : ''}`
     } else if (success === false || error) {
       tone = failed > 0 && processed > 0 ? 'warning' : 'danger'
       icon = 'lucide:circle-alert'
       label = failed > 0 && processed > 0 ? '部分失败' : '失败'
       cardMeta = finishedAt ? `上次自动刷新异常 ${finishedAt}` : '自动刷新失败'
       timeText = finishedAt ? `完成于 ${finishedAt}` : (startedAt ? `开始于 ${startedAt}` : '自动刷新失败')
-      summaryText = `已处理 ${processed}/${total} 个账号，失败 ${failed} 个`
+      summaryText = `已处理 ${processed}/${total} 个账号，本轮发现异常 ${abnormalDetected} 个，检测失败 ${failed} 个`
       detailText = error || (duration ? `耗时 ${duration}` : '')
     } else if (hasHistory) {
       tone = 'muted'
