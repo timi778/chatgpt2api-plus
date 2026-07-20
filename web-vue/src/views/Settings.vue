@@ -439,7 +439,7 @@ const refreshAccountIntervalField = useNumberSettingField(
     if (!localSettings.value) return
     localSettings.value.refresh_account_interval_minute = value
   },
-  { integer: true, min: 1, fallback: 5 },
+  { integer: true, min: 0, fallback: 5 },
 )
 const imagePollTimeoutField = useNumberSettingField(
   () => localSettings.value?.image_poll_timeout_secs ?? 120,

@@ -885,6 +885,11 @@ def create_router(app_version: str) -> APIRouter:
         recent_log_summary = _dashboard_log_summary(call_logs, time_range=time_range)
         await run_in_threadpool(dashboard_metrics_service.backfill_if_empty, call_logs)
         dashboard_logs = await run_in_threadpool(dashboard_metrics_service.summary, time_range)
+        account_trend = await run_in_threadpool(
+            dashboard_metrics_service.account_summary,
+            time_range,
+            config.refresh_account_interval_minute,
+        )
         dashboard_logs["recent_failures"] = recent_log_summary.get("recent_failures", [])
         image_storage_stats = await run_in_threadpool(storage_stats)
         storage_health = await run_in_threadpool(storage.health_check)
@@ -894,6 +899,7 @@ def create_router(app_version: str) -> APIRouter:
             "version": app_version,
             "accounts": {
                 **account_stats,
+                "trend": account_trend,
                 "healthy": account_healthy,
             },
             "storage": {

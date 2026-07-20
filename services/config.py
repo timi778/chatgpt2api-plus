@@ -351,7 +351,7 @@ def _load_settings() -> LoadedSettings:
         )
 
     try:
-        refresh_interval = int(raw_config.get("refresh_account_interval_minute", 5))
+        refresh_interval = max(0, int(raw_config.get("refresh_account_interval_minute", 5)))
     except (TypeError, ValueError):
         refresh_interval = 5
 
@@ -410,7 +410,7 @@ class ConfigStore:
     @property
     def refresh_account_interval_minute(self) -> int:
         try:
-            return int(self.data.get("refresh_account_interval_minute", 5))
+            return max(0, int(self.data.get("refresh_account_interval_minute", 5)))
         except (TypeError, ValueError):
             return 5
 
@@ -666,6 +666,14 @@ class ConfigStore:
             next_data = _promote_legacy_basic_settings(self.data)
             next_data.update(_promote_legacy_basic_settings(dict(data or {})))
             next_data = _promote_legacy_basic_settings(next_data)
+            if "refresh_account_interval_minute" in next_data:
+                try:
+                    refresh_interval = int(next_data.get("refresh_account_interval_minute", 5))
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("账号刷新间隔必须是大于等于 0 的整数") from exc
+                if refresh_interval < 0:
+                    raise ValueError("账号刷新间隔必须是大于等于 0 的整数")
+                next_data["refresh_account_interval_minute"] = refresh_interval
             if "backup" in next_data:
                 next_data["backup"] = _normalize_backup_settings(next_data.get("backup"))
             if "image_storage" in next_data:

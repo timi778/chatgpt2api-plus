@@ -121,7 +121,41 @@ def _merge_bucket(target: dict[str, Any], source: dict[str, Any]) -> None:
 
 
 def _empty_metrics_data() -> dict[str, Any]:
-    return {"version": 1, "days": {}}
+    return {"version": 2, "days": {}, "account_snapshots": []}
+
+
+def _nonnegative_int(value: object) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _normalize_account_snapshot(value: object) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    recorded_at = _parse_log_time(value.get("recorded_at"))
+    if recorded_at is None:
+        return None
+    return {
+        "recorded_at": recorded_at.isoformat(timespec="seconds"),
+        "interval_minutes": _nonnegative_int(value.get("interval_minutes")),
+        "active": _nonnegative_int(value.get("active")),
+        "limited": _nonnegative_int(value.get("limited")),
+        "abnormal": _nonnegative_int(value.get("abnormal")),
+    }
+
+
+def _merge_account_snapshots(target: dict[str, Any], source: dict[str, Any]) -> None:
+    merged: dict[str, dict[str, Any]] = {}
+    for collection in (target.get("account_snapshots"), source.get("account_snapshots")):
+        if not isinstance(collection, list):
+            continue
+        for raw_snapshot in collection:
+            snapshot = _normalize_account_snapshot(raw_snapshot)
+            if snapshot is not None:
+                merged[snapshot["recorded_at"]] = snapshot
+    target["account_snapshots"] = [merged[key] for key in sorted(merged)]
 
 
 def _merge_metrics_data(target: dict[str, Any], source: dict[str, Any]) -> None:
@@ -149,6 +183,7 @@ def _merge_metrics_data(target: dict[str, Any], source: dict[str, Any]) -> None:
                 target_hour = _empty_bucket()
                 target_hours[str(hour_key)] = target_hour
             _merge_bucket(target_hour, source_hour)
+    _merge_account_snapshots(target, source)
 
 
 @contextmanager
@@ -194,18 +229,21 @@ class DashboardMetricsService:
         data = read_json_object(self.path, name="dashboard_metrics.json")
         if not isinstance(data.get("days"), dict):
             data["days"] = {}
-        data["version"] = 1
+        if not isinstance(data.get("account_snapshots"), list):
+            data["account_snapshots"] = []
+        data["version"] = 2
         return data
 
     def _save(self, data: dict[str, Any]) -> None:
-        data["version"] = 1
+        data["version"] = 2
         data["retention_days"] = DASHBOARD_METRICS_RETENTION_DAYS
         data["updated_at"] = beijing_now().isoformat(timespec="seconds")
         write_json_file(self.path, data)
 
     @staticmethod
     def _prune(data: dict[str, Any], now: datetime | None = None) -> bool:
-        current = (now or _beijing_now_naive()).date()
+        current_time = now or _beijing_now_naive()
+        current = current_time.date()
         cutoff = current - timedelta(days=DASHBOARD_METRICS_RETENTION_DAYS - 1)
         days = data.get("days") if isinstance(data.get("days"), dict) else {}
         changed = False
@@ -219,6 +257,22 @@ class DashboardMetricsService:
             if parsed < cutoff or parsed > current:
                 days.pop(day, None)
                 changed = True
+        snapshot_cutoff = current_time - timedelta(days=DASHBOARD_METRICS_RETENTION_DAYS)
+        snapshots = data.get("account_snapshots") if isinstance(data.get("account_snapshots"), list) else []
+        kept_snapshots: list[dict[str, Any]] = []
+        for raw_snapshot in snapshots:
+            snapshot = _normalize_account_snapshot(raw_snapshot)
+            if snapshot is None:
+                changed = True
+                continue
+            recorded_at = _parse_log_time(snapshot["recorded_at"])
+            if recorded_at is None or recorded_at < snapshot_cutoff or recorded_at > current_time:
+                changed = True
+                continue
+            kept_snapshots.append(snapshot)
+        if kept_snapshots != snapshots:
+            data["account_snapshots"] = kept_snapshots
+            changed = True
         return changed
 
     def _schedule_flush_locked(self) -> None:
@@ -319,6 +373,27 @@ class DashboardMetricsService:
             return
         with self._lock:
             self._apply_call_to_data(self._pending, item, dt)
+            self._mark_dirty_locked()
+
+    def record_account_snapshot(
+        self,
+        stats: dict[str, Any],
+        *,
+        interval_minutes: int,
+        recorded_at: datetime | str | None = None,
+    ) -> None:
+        dt = _parse_log_time(recorded_at) if recorded_at is not None else _beijing_now_naive()
+        if dt is None:
+            dt = _beijing_now_naive()
+        snapshot = {
+            "recorded_at": dt.isoformat(timespec="seconds"),
+            "interval_minutes": _nonnegative_int(interval_minutes),
+            "active": _nonnegative_int(stats.get("active")),
+            "limited": _nonnegative_int(stats.get("limited")),
+            "abnormal": _nonnegative_int(stats.get("abnormal")),
+        }
+        with self._lock:
+            self._pending.setdefault("account_snapshots", []).append(snapshot)
             self._mark_dirty_locked()
 
     def backfill_if_empty(self, items: list[dict[str, Any]]) -> None:
@@ -430,6 +505,55 @@ class DashboardMetricsService:
             },
         }
 
+    def account_summary(self, time_range: str = "24h", interval_minutes: int = 5) -> dict[str, Any]:
+        range_delta = {
+            "24h": timedelta(hours=24),
+            "7d": timedelta(days=7),
+            "30d": timedelta(days=30),
+        }.get(time_range, timedelta(hours=24))
+        raw_now = _beijing_now_naive()
+        start_at = raw_now - range_delta
+        configured_interval = max(0, int(interval_minutes or 0))
+
+        with self._lock:
+            with _metrics_file_lock(self.path):
+                data = self._load_persisted()
+            _merge_metrics_data(data, self._pending)
+            if self._prune(data, raw_now):
+                self._mark_dirty_locked()
+            raw_snapshots = copy.deepcopy(data.get("account_snapshots", []))
+
+        snapshots: list[tuple[datetime, dict[str, Any]]] = []
+        for raw_snapshot in raw_snapshots:
+            snapshot = _normalize_account_snapshot(raw_snapshot)
+            if snapshot is None:
+                continue
+            recorded_at = _parse_log_time(snapshot["recorded_at"])
+            if recorded_at is None or recorded_at < start_at or recorded_at > raw_now:
+                continue
+            snapshots.append((recorded_at, snapshot))
+        snapshots.sort(key=lambda item: item[0])
+
+        if configured_interval > 0:
+            bucket_seconds = configured_interval * 60
+            epoch = datetime(1970, 1, 1)
+            bucketed: dict[int, tuple[datetime, dict[str, Any]]] = {}
+            for recorded_at, snapshot in snapshots:
+                bucket_key = int((recorded_at - epoch).total_seconds() // bucket_seconds)
+                bucketed[bucket_key] = (recorded_at, snapshot)
+            snapshots = [bucketed[key] for key in sorted(bucketed)]
+
+        label_format = "%H:%M" if time_range == "24h" else "%m-%d %H:%M"
+        return {
+            "enabled": configured_interval > 0,
+            "interval_minutes": configured_interval,
+            "labels": [recorded_at.strftime(label_format) for recorded_at, _ in snapshots],
+            "recorded_at": [recorded_at.isoformat(timespec="seconds") for recorded_at, _ in snapshots],
+            "active_accounts": [snapshot["active"] for _, snapshot in snapshots],
+            "abnormal_accounts": [snapshot["abnormal"] for _, snapshot in snapshots],
+            "rate_limited_accounts": [snapshot["limited"] for _, snapshot in snapshots],
+        }
+
 
 dashboard_metrics_service = DashboardMetricsService()
 atexit.register(dashboard_metrics_service.flush)
@@ -440,3 +564,10 @@ def safe_record_dashboard_call(item: dict[str, Any]) -> None:
         dashboard_metrics_service.record_call_log(item)
     except Exception as exc:
         logger.error({"event": "dashboard_metrics_record_failed", "error": str(exc)})
+
+
+def safe_record_account_snapshot(stats: dict[str, Any], *, interval_minutes: int) -> None:
+    try:
+        dashboard_metrics_service.record_account_snapshot(stats, interval_minutes=interval_minutes)
+    except Exception as exc:
+        logger.error({"event": "dashboard_account_snapshot_record_failed", "error": str(exc)})

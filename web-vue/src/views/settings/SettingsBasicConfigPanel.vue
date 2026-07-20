@@ -3,11 +3,12 @@
     <div class="grid grid-cols-1 gap-3 md:grid-cols-2">
       <FormField label="账号刷新间隔">
         <template #label-extra>
-          <HelpTip text="单位分钟，控制账号自动刷新频率。" />
+          <HelpTip text="单位分钟，控制账号自动刷新频率；设置为 0 时停用自动刷新。" />
         </template>
         <Input
           :model-value="refreshAccountIntervalField.input.value"
           type="number"
+          min="0"
           block
           placeholder="5"
           @update:model-value="refreshAccountIntervalField.update"

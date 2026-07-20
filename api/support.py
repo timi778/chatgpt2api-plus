@@ -3,16 +3,19 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Event, Thread
+from time import monotonic
 
 from fastapi import HTTPException, Request
 
 from services.account_service import account_service
 from services.auth_service import auth_service
 from services.config import config
+from services.dashboard_metrics_service import safe_record_account_snapshot
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 WEB_DIST_DIR = BASE_DIR / "web_dist"
 ACCOUNT_AUTO_REFRESH_BATCH_SIZE = 5
+ACCOUNT_AUTO_REFRESH_CONFIG_POLL_SECONDS = 5
 
 
 def extract_bearer_token(authorization: str | None) -> str:
@@ -79,11 +82,26 @@ def _account_refresh_interval_seconds() -> int:
         minutes = int(config.refresh_account_interval_minute)
     except (TypeError, ValueError):
         minutes = 5
-    return max(1, minutes) * 60
+    return max(0, minutes) * 60
 
 
 def _next_run_at(interval_seconds: int) -> str:
     return (datetime.now(timezone.utc) + timedelta(seconds=max(1, interval_seconds))).isoformat()
+
+
+def _wait_for_next_account_refresh(stop_event: Event, interval_seconds: int) -> None:
+    if interval_seconds <= 0:
+        stop_event.wait(ACCOUNT_AUTO_REFRESH_CONFIG_POLL_SECONDS)
+        return
+    deadline = monotonic() + interval_seconds
+    while not stop_event.is_set():
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            return
+        if stop_event.wait(min(ACCOUNT_AUTO_REFRESH_CONFIG_POLL_SECONDS, remaining)):
+            return
+        if _account_refresh_interval_seconds() != interval_seconds:
+            return
 
 
 def _token_batches(tokens: list[str], batch_size: int = ACCOUNT_AUTO_REFRESH_BATCH_SIZE) -> list[list[str]]:
@@ -94,9 +112,16 @@ def _token_batches(tokens: list[str], batch_size: int = ACCOUNT_AUTO_REFRESH_BAT
 def start_limited_account_watcher(stop_event: Event) -> Thread:
     def worker() -> None:
         while not stop_event.is_set():
+            interval_seconds = _account_refresh_interval_seconds()
+            if interval_seconds <= 0:
+                account_service.disable_auto_refresh_status()
+                _wait_for_next_account_refresh(stop_event, 0)
+                continue
+
             processed = 0
             refreshed = 0
             errors: list[object] = []
+            interval_minutes = max(1, interval_seconds // 60)
             try:
                 limited_tokens = account_service.list_limited_tokens()
                 normal_tokens = account_service.list_normal_tokens()
@@ -108,6 +133,7 @@ def start_limited_account_watcher(stop_event: Event) -> Thread:
                     total=len(tokens),
                     batch_size=ACCOUNT_AUTO_REFRESH_BATCH_SIZE,
                     batch_count=len(batches),
+                    interval_minutes=interval_minutes,
                 )
                 expiring_token_set = set(expiring_tokens)
                 keepalive_tokens = [token for token in keepalive_tokens if token not in expiring_token_set]
@@ -140,7 +166,7 @@ def start_limited_account_watcher(stop_event: Event) -> Thread:
                     result = account_service.keepalive_refresh_tokens(keepalive_tokens)
                     if result.get("errors"):
                         print(f"[account-watcher] keepalive errors: {result['errors']}")
-                interval_seconds = _account_refresh_interval_seconds()
+                next_interval_seconds = _account_refresh_interval_seconds()
                 stopped = stop_event.is_set() and processed < len(tokens)
                 account_service.finish_auto_refresh_status(
                     success=not errors and not stopped,
@@ -148,21 +174,25 @@ def start_limited_account_watcher(stop_event: Event) -> Thread:
                     refreshed=refreshed,
                     failed=len(errors),
                     error="stopped" if stopped else "",
-                    next_run_at="" if stopped else _next_run_at(interval_seconds),
+                    next_run_at=(
+                        ""
+                        if stopped or next_interval_seconds <= 0
+                        else _next_run_at(next_interval_seconds)
+                    ),
                 )
             except Exception as exc:
-                interval_seconds = _account_refresh_interval_seconds()
+                next_interval_seconds = _account_refresh_interval_seconds()
                 account_service.finish_auto_refresh_status(
                     success=False,
                     processed=processed,
                     refreshed=refreshed,
                     failed=len(errors),
                     error=str(exc),
-                    next_run_at=_next_run_at(interval_seconds),
+                    next_run_at=_next_run_at(next_interval_seconds) if next_interval_seconds > 0 else "",
                 )
                 print(f"[account-watcher] fail {exc}")
-            interval_seconds = _account_refresh_interval_seconds()
-            stop_event.wait(interval_seconds)
+            safe_record_account_snapshot(account_service.get_stats(), interval_minutes=interval_minutes)
+            _wait_for_next_account_refresh(stop_event, _account_refresh_interval_seconds())
 
     thread = Thread(target=worker, name="account-watcher", daemon=True)
     thread.start()

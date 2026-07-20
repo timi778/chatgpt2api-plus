@@ -272,6 +272,8 @@ export interface AdminStatsTrend {
 }
 
 export interface AccountAutoRefreshStatus {
+  enabled?: boolean
+  interval_minutes?: number
   running: boolean
   success?: boolean | null
   started_at?: string
@@ -289,6 +291,16 @@ export interface AccountAutoRefreshStatus {
   error?: string
 }
 
+export interface AccountStatusTrend {
+  enabled: boolean
+  interval_minutes: number
+  labels: string[]
+  recorded_at?: string[]
+  active_accounts: number[]
+  abnormal_accounts: number[]
+  rate_limited_accounts: number[]
+}
+
 export interface AdminStats {
   total_accounts: number
   active_accounts: number
@@ -301,6 +313,7 @@ export interface AdminStats {
   unlimited_quota_count?: number
   unknown_quota_count?: number
   auto_refresh?: AccountAutoRefreshStatus
+  account_trend?: AccountStatusTrend
   success_count?: number
   failed_count?: number
   recent_failures?: Array<{
@@ -368,6 +381,7 @@ export interface DashboardAccountStats {
   total_fail?: number
   by_type?: Record<string, number>
   auto_refresh?: AccountAutoRefreshStatus
+  trend?: AccountStatusTrend
   healthy: boolean
 }
 

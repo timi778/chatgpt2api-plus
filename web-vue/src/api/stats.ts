@@ -65,6 +65,7 @@ function adaptDashboardToStats(dashboard: DashboardResponse): AdminStats {
     unlimited_quota_count: Number(accounts.unlimited_quota_count || 0),
     unknown_quota_count: Number(accounts.unknown_quota_count || 0),
     auto_refresh: accounts.auto_refresh,
+    account_trend: accounts.trend,
     success_count: successCount,
     failed_count: failedCount,
     recent_failures: Array.isArray(logs.recent_failures) ? logs.recent_failures : [],

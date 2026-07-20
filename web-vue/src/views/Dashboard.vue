@@ -3,7 +3,7 @@
     <PageLoadingState
       v-if="!dashboardDataReady"
       title="正在加载概览"
-      description="读取最新账号、调用趋势和模型统计。"
+      description="读取最新账号、账号数量趋势、调用趋势和模型统计。"
     />
 
     <template v-else>
@@ -50,6 +50,18 @@
           </span>
         </div>
       </div>
+    </section>
+
+    <section class="grid grid-cols-1 gap-4">
+      <ChartCard title="账号数量趋势">
+        <template #actions>
+          <div class="flex items-center gap-3">
+            <span class="hidden text-xs text-muted-foreground sm:inline">{{ accountTrendIntervalText }}</span>
+            <TimeRangeTabs v-model="timeRangeAccountTrend" aria-label="账号数量趋势时间范围" />
+          </div>
+        </template>
+        <div ref="accountTrendChartRef" class="h-56 w-full"></div>
+      </ChartCard>
     </section>
 
     <section class="grid grid-cols-1 gap-4">
@@ -118,7 +130,9 @@ defineOptions({ name: 'Dashboard' })
 const {
   stats,
   autoRefreshStatus,
+  accountTrendIntervalText,
   dashboardDataReady,
+  timeRangeAccountTrend,
   timeRangeHourlyRequests,
   timeRangeTrend,
   timeRangeSuccessRate,
@@ -126,6 +140,7 @@ const {
   timeRangeModelRank,
   timeRangeResponseTime,
   hourlyRequestsChartRef,
+  accountTrendChartRef,
   trendChartRef,
   successRateChartRef,
   responseTimeChartRef,

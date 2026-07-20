@@ -152,6 +152,8 @@ class AccountService:
     @staticmethod
     def _empty_auto_refresh_status() -> dict[str, Any]:
         return {
+            "enabled": True,
+            "interval_minutes": 5,
             "running": False,
             "success": None,
             "started_at": "",
@@ -1300,7 +1302,8 @@ class AccountService:
                 return max(60, int(float(freshness_seconds)))
             except (TypeError, ValueError):
                 pass
-        return max(60, int(config.refresh_account_interval_minute) * 60)
+        configured = max(0, int(config.refresh_account_interval_minute))
+        return max(60, configured * 60) if configured > 0 else 60
 
     @classmethod
     def _remote_check_is_fresh(cls, account: dict, now: datetime, freshness_seconds: int) -> bool:
@@ -2059,10 +2062,18 @@ class AccountService:
         with self._refresh_progress_lock:
             self._refresh_progress.pop(progress_id, None)
 
-    def start_auto_refresh_status(self, total: int, batch_size: int, batch_count: int) -> None:
+    def start_auto_refresh_status(
+        self,
+        total: int,
+        batch_size: int,
+        batch_count: int,
+        interval_minutes: int,
+    ) -> None:
         now = self._now_iso()
         with self._refresh_progress_lock:
             self._auto_refresh_status.update({
+                "enabled": True,
+                "interval_minutes": max(0, int(interval_minutes or 0)),
                 "running": True,
                 "success": None,
                 "started_at": now,
@@ -2078,6 +2089,17 @@ class AccountService:
                 "batch_index": 0,
                 "duration_seconds": 0,
                 "error": "",
+            })
+
+    def disable_auto_refresh_status(self) -> None:
+        now = self._now_iso()
+        with self._refresh_progress_lock:
+            self._auto_refresh_status.update({
+                "enabled": False,
+                "interval_minutes": 0,
+                "running": False,
+                "next_run_at": "",
+                "updated_at": now,
             })
 
     def update_auto_refresh_status(
@@ -2131,7 +2153,13 @@ class AccountService:
 
     def get_auto_refresh_status(self) -> dict[str, Any]:
         with self._refresh_progress_lock:
-            return dict(self._auto_refresh_status)
+            status = dict(self._auto_refresh_status)
+        interval_minutes = max(0, int(config.refresh_account_interval_minute))
+        status["enabled"] = interval_minutes > 0
+        status["interval_minutes"] = interval_minutes
+        if interval_minutes <= 0:
+            status["next_run_at"] = ""
+        return status
 
     def refresh_accounts(
         self,

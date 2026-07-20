@@ -28,7 +28,7 @@ export function useDashboardPage() {
     dispatchAction?: (payload: Record<string, unknown>) => void
   }
   type RenderMode = 'initial' | 'range' | 'refresh'
-  type ChartType = 'hourlyRequests' | 'trend' | 'successRate' | 'model' | 'modelRank' | 'responseTime'
+  type ChartType = 'accountTrend' | 'hourlyRequests' | 'trend' | 'successRate' | 'model' | 'modelRank' | 'responseTime'
   type AutoRefreshTone = 'success' | 'danger' | 'warning' | 'info' | 'muted'
   type OverviewPayload = Record<string, any>
   const pageRuntime = usePageRuntime('dashboard')
@@ -42,6 +42,7 @@ export function useDashboardPage() {
   })
 
   // 每个图表独立的时间范围
+  const timeRangeAccountTrend = ref<DashboardTimeRange>(DEFAULT_DASHBOARD_TIME_RANGE)
   const timeRangeHourlyRequests = ref<DashboardTimeRange>(DEFAULT_DASHBOARD_TIME_RANGE)
   const timeRangeTrend = ref<DashboardTimeRange>(DEFAULT_DASHBOARD_TIME_RANGE)
   const timeRangeSuccessRate = ref<DashboardTimeRange>(DEFAULT_DASHBOARD_TIME_RANGE)
@@ -60,6 +61,7 @@ export function useDashboardPage() {
   }
 
   // 监听各图表时间范围变化 - 只更新对应图表
+  watch(timeRangeAccountTrend, createChartWatcher('accountTrend', updateAccountTrendChart))
   watch(timeRangeHourlyRequests, createChartWatcher('hourlyRequests', updateHourlyRequestsChart))
   watch(timeRangeTrend, createChartWatcher('trend', updateTrendChart))
   watch(timeRangeSuccessRate, createChartWatcher('successRate', updateSuccessRateChart))
@@ -132,10 +134,17 @@ export function useDashboardPage() {
     detailText: '',
     nextRunText: '',
   })
+  const accountTrendIntervalText = ref('跟随自动刷新间隔')
 
   // 每个图表独立的数据状态
   function createEmptyChartData() {
     return {
+      accountTrend: {
+        labels: [] as string[],
+        activeAccounts: [] as number[],
+        abnormalAccounts: [] as number[],
+        rateLimitedAccounts: [] as number[],
+      },
       hourlyRequests: {
         labels: [] as string[],
         modelRequests: {} as Record<string, number[]>,
@@ -171,6 +180,7 @@ export function useDashboardPage() {
   const overviewCache = new Map<string, OverviewPayload>()
   const overviewRequests = new Map<string, Promise<OverviewPayload>>()
 
+  const accountTrendChartRef = ref<HTMLDivElement | null>(null)
   const trendChartRef = ref<HTMLDivElement | null>(null)
   const modelChartRef = ref<HTMLDivElement | null>(null)
   const successRateChartRef = ref<HTMLDivElement | null>(null)
@@ -179,6 +189,7 @@ export function useDashboardPage() {
   const responseTimeChartRef = ref<HTMLDivElement | null>(null)
 
   const charts = {
+    accountTrend: null as ChartInstance | null,
     trend: null as ChartInstance | null,
     model: null as ChartInstance | null,
     successRate: null as ChartInstance | null,
@@ -199,6 +210,7 @@ export function useDashboardPage() {
     refresh: { duration: 260, updateDuration: 220, delayStep: 0, lazyUpdate: true },
   }
   const chartFirstRenderState = ref<Record<ChartKey, boolean>>({
+    accountTrend: true,
     trend: true,
     model: true,
     successRate: true,
@@ -260,6 +272,7 @@ export function useDashboardPage() {
 
   function bootstrapCharts() {
     if (chartsBootstrapped.value) return
+    initChart(accountTrendChartRef.value, 'accountTrend', updateAccountTrendChart)
     initChart(trendChartRef.value, 'trend', updateTrendChart)
     initChart(modelChartRef.value, 'model', updateModelChart)
     initChart(successRateChartRef.value, 'successRate', updateSuccessRateChart)
@@ -271,6 +284,7 @@ export function useDashboardPage() {
 
   function resetChartFirstRenderState() {
     chartFirstRenderState.value = {
+      accountTrend: true,
       trend: true,
       model: true,
       successRate: true,
@@ -295,7 +309,7 @@ export function useDashboardPage() {
 
   function cancelDashboardDataRequests(options: { clearRequests?: boolean } = {}) {
     dashboardDataQuery.invalidate()
-    ;(['hourlyRequests', 'trend', 'successRate', 'model', 'modelRank', 'responseTime'] as ChartType[]).forEach((chartType) => {
+    ;(['accountTrend', 'hourlyRequests', 'trend', 'successRate', 'model', 'modelRank', 'responseTime'] as ChartType[]).forEach((chartType) => {
       pageRuntime.invalidateRequest(chartRequestKey(chartType))
     })
     if (options.clearRequests !== false) {
@@ -387,6 +401,42 @@ export function useDashboardPage() {
     }, mode)
   }
 
+  function updateAccountTrendChart(mode: RenderMode = 'refresh') {
+    if (!charts.accountTrend) return
+
+    const theme = getLineChartTheme()
+    const showSymbol = chartData.value.accountTrend.labels.length <= 48
+    applyAnimatedOption('accountTrend', {
+      ...theme,
+      xAxis: {
+        ...theme.xAxis,
+        data: chartData.value.accountTrend.labels,
+      },
+      yAxis: {
+        ...theme.yAxis,
+        min: 0,
+        minInterval: 1,
+      },
+      series: [
+        createLineSeries('正常账号', chartData.value.accountTrend.activeAccounts, chartColors.success, {
+          areaOpacity: 0.12,
+          showSymbol,
+          zIndex: 3,
+        }),
+        createLineSeries('异常账号', chartData.value.accountTrend.abnormalAccounts, chartColors.danger, {
+          areaOpacity: 0.1,
+          showSymbol,
+          zIndex: 2,
+        }),
+        createLineSeries('限流账号', chartData.value.accountTrend.rateLimitedAccounts, chartColors.warning, {
+          areaOpacity: 0.1,
+          showSymbol,
+          zIndex: 2,
+        }),
+      ],
+    }, mode)
+  }
+
   function getModelTotals() {
     return Object.entries(chartData.value.model.modelRequests)
       .map(([model, data]) => ({
@@ -447,6 +497,8 @@ export function useDashboardPage() {
 
   function getChartRange(chartType: ChartType) {
     switch (chartType) {
+      case 'accountTrend':
+        return timeRangeAccountTrend.value
       case 'hourlyRequests':
         return timeRangeHourlyRequests.value
       case 'trend':
@@ -527,6 +579,7 @@ export function useDashboardPage() {
 
   function applyAutoRefreshStatus(rawStatus: unknown) {
     const status = rawStatus && typeof rawStatus === 'object' ? rawStatus as Record<string, any> : {}
+    const enabled = status.enabled !== false
     const running = Boolean(status.running)
     const success = status.success
     const total = Math.max(0, Number(status.total || 0))
@@ -549,7 +602,15 @@ export function useDashboardPage() {
     let summaryText = '等待定时任务启动'
     let detailText = ''
 
-    if (running) {
+    if (!enabled) {
+      tone = 'muted'
+      icon = 'lucide:pause-circle'
+      label = '已停用'
+      cardMeta = '账号自动刷新已停用'
+      timeText = finishedAt ? `上次完成于 ${finishedAt}` : '不会自动刷新账号'
+      summaryText = '设置中的刷新间隔为 0'
+      detailText = hasHistory ? '历史账号趋势仍会保留 30 天' : ''
+    } else if (running) {
       tone = 'info'
       label = '刷新中'
       cardMeta = `自动刷新中 ${processed}/${total}`
@@ -644,6 +705,23 @@ export function useDashboardPage() {
   }
 
   function applyOverviewToChartData(chartType: ChartType, overview: OverviewPayload) {
+    if (chartType === 'accountTrend') {
+      const accountTrend = overview.account_trend && typeof overview.account_trend === 'object'
+        ? overview.account_trend
+        : {}
+      const labels = normalizeLabels(accountTrend.labels)
+      const pointCount = labels.length > 0 ? labels.length : undefined
+      chartData.value.accountTrend.labels = labels
+      chartData.value.accountTrend.activeAccounts = normalizeNumberSeries(accountTrend.active_accounts, pointCount)
+      chartData.value.accountTrend.abnormalAccounts = normalizeNumberSeries(accountTrend.abnormal_accounts, pointCount)
+      chartData.value.accountTrend.rateLimitedAccounts = normalizeNumberSeries(accountTrend.rate_limited_accounts, pointCount)
+      const intervalMinutes = Math.max(0, Number(accountTrend.interval_minutes || 0))
+      accountTrendIntervalText.value = accountTrend.enabled === false || intervalMinutes <= 0
+        ? '自动刷新已停用'
+        : `每 ${Math.trunc(intervalMinutes)} 分钟采样`
+      return
+    }
+
     const trend = getTrendPayload(overview)
     const labels = normalizeLabels(trend.labels)
     const pointCount = labels.length > 0 ? labels.length : undefined
@@ -694,6 +772,7 @@ export function useDashboardPage() {
 
   function getDashboardChartRanges(): Record<ChartType, DashboardTimeRange> {
     return {
+      accountTrend: timeRangeAccountTrend.value,
       hourlyRequests: timeRangeHourlyRequests.value,
       trend: timeRangeTrend.value,
       successRate: timeRangeSuccessRate.value,
@@ -724,7 +803,7 @@ export function useDashboardPage() {
       applyAccountStats(accountOverview)
     }
 
-    ;(['hourlyRequests', 'trend', 'successRate', 'model', 'modelRank', 'responseTime'] as ChartType[]).forEach((chartType) => {
+    ;(['accountTrend', 'hourlyRequests', 'trend', 'successRate', 'model', 'modelRank', 'responseTime'] as ChartType[]).forEach((chartType) => {
       if (chartRanges[chartType] !== getChartRange(chartType)) return
       const overview = overviewCache.get(chartRanges[chartType])
       if (overview) applyOverviewToChartData(chartType, overview)
@@ -1151,13 +1230,16 @@ export function useDashboardPage() {
   return {
     stats,
     autoRefreshStatus,
+    accountTrendIntervalText,
     dashboardDataReady,
+    timeRangeAccountTrend,
     timeRangeHourlyRequests,
     timeRangeTrend,
     timeRangeSuccessRate,
     timeRangeModel,
     timeRangeModelRank,
     timeRangeResponseTime,
+    accountTrendChartRef,
     hourlyRequestsChartRef,
     trendChartRef,
     successRateChartRef,
